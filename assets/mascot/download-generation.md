@@ -1,0 +1,11 @@
+# Download panel mascot
+
+Generated with the built-in image generation tool, using `character-reference.png` as the identity reference. The original welcome animation is unchanged.
+
+`download-perch.png` is a transparent 4 × 4 atlas. Its generated resolution is retained; the renderer maps each cell to 110 points without modifying the alpha channel. The hands meet the panel at 104 points from the top of its viewport. Playback uses selected forward/downward/blink frames to avoid the overly lowered eyelids in other frames. The mouth retains its smile; slight illustrated differences between poses may remain visible on inspection.
+
+## Prompt
+
+Renderer correction: each cell clips its first 8 source pixels. Fingertips from the preceding atlas row extend into that strip; the current frame's hat starts below it. The offset is compensated so the mascot and border grip do not move.
+
+Create a production sprite atlas using the provided AgriGrow character sheet as identity/style reference ONLY. Transparent PNG true alpha, target 1024x1024, exact 4x4 equal square cells with no gutters or labels. All 16 cells show IDENTICAL front-facing smiling boy farmer in green leaf-emblem bucket hat, black hair, white shirt, green overalls, peeking over an INVISIBLE horizontal ledge and gripping it with BOTH hands. Each cell: hat top local y=18, face center x=128 y=100, ledge grip baseline y=216, left hand x=66 and right hand x=190, fingers curled down to y=235. Upper body ends cleanly at ledge baseline except gripping fingers. No actual ledge, border, text or background drawn. Same body, hat, hands, smile and head position in every cell, animate ONLY eyes and eyelids. Row-major frames 0..15: 0 eyes forward; 1 subtly down; 2 halfway down; 3 mostly down; 4 eyes down toward text under ledge; 5 same down; 6 same down; 7 same down; 8 mostly down; 9 halfway up; 10 slightly down; 11 eyes forward; 12 forward half-closed eyelids; 13 eyes closed blinking while smiling; 14 forward half-open; 15 eyes forward IDENTICAL to frame0. Fixed cheerful gentle open smile. Keep hands identical and stationary, anatomically correct. No head bob, no body movement, no gaze sideways. Maintain same scale and precise alignment. Transparent margins all sides. Not a character sheet: a coherent animation atlas, no framing or written instructions.

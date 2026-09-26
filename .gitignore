@@ -5,12 +5,19 @@ node_modules/
 
 # Expo
 .expo/
+.expo-export-check/
 dist/
 web-build/
 expo-env.d.ts
 
 # Native
 .kotlin/
+.gradle/
+**/.gradle/
+build/
+**/build/
+.transforms/
+**/.transforms/
 *.orig.*
 *.jks
 *.p8
@@ -23,6 +30,7 @@ expo-env.d.ts
 
 # debug
 npm-debug.*
+/android-build.log
 yarn-debug.*
 yarn-error.*
 
@@ -32,6 +40,10 @@ yarn-error.*
 
 # local env files
 .env*.local
+
+# local credentials and large AI model files
+API Key Hugging Face.txt
+*.litertlm
 
 # typescript
 *.tsbuildinfo
