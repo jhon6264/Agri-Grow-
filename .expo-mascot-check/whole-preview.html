@@ -1,0 +1,91 @@
+<!doctype html><meta charset="utf-8"><title>Complete character animation preview</title><style>body{font-family:Arial;background:#e7eee8;color:#20432d;margin:20px}button{padding:10px;margin:4px}.row{display:flex;gap:25px}.phone{position:relative;overflow:hidden;background:white;height:460px}.status{height:44px;padding:12px 20px;box-sizing:border-box}.tabs{height:36px;margin:3px auto;width:224px;border:1px solid #ccc;border-radius:10px;font-size:12px;display:flex;align-items:center;justify-content:center}.heading{box-sizing:border-box;padding:10px 12px 0}.heading b{font-size:27px;line-height:36px}.heading p{font-size:13px}.card{margin:0 12px;background:#d1e6d5;border-radius:20px;padding:20px;height:220px}.mascot{position:absolute;right:0}.large{background:white;width:232px}.time{font-size:13px}</style><h3>Complete-character frames · 15% smaller · aligned playback</h3><button onclick="playing=true;start=performance.now()">Play loop</button><button onclick="stop(0)">Grip</button><button onclick="stop(2)">Release</button><button onclick="stop(4)">Wave inward</button><button onclick="stop(6)">Wave outward</button><button onclick="stop(14)">Blink</button><span class="time"></span><div class="row"><div class="phone" style="width:390px"><div class="status">20:00</div><div class="tabs">Calendar　　Chat　　Others</div><div class="heading" style="min-height:134.3551724137931px;padding-right:104.05px"><b>Good Evening, Jhon</b><p>Sunday, September 27</p></div><div class="card">Calendar cards</div><div class="mascot" style="top:57px"><svg width="96.05" height="152.3551724137931" viewBox="12 16 232 368"><image class="pose" href="/assets/mascot/calendar-whole-character.png" width="1024" height="1536"/></svg></div></div><div class="phone" style="width:320px"><div class="status">20:00</div><div class="tabs">Calendar　　Chat　　Others</div><div class="heading" style="min-height:125.38965517241377px;padding-right:87.05px"><b>Good Evening, Jhon</b><p>Sunday, September 27</p></div><div class="card">Calendar cards</div><div class="mascot" style="top:75px"><svg width="79.05" height="125.38965517241378" viewBox="12 16 232 368"><image class="pose" href="/assets/mascot/calendar-whole-character.png" width="1024" height="1536"/></svg></div></div><div class="large"><svg width="232" height="368" viewBox="12 16 232 368"><image class="pose" href="/assets/mascot/calendar-whole-character.png" width="1024" height="1536"/></svg></div></div><script>const exports={};"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.WHOLE_CYCLE_MS = exports.WHOLE_SEQUENCE = exports.WHOLE_OFFSETS = exports.WHOLE_FRAME = void 0;
+exports.wholeFrameAt = wholeFrameAt;
+// Each displayed pose is a complete character. Offsets align the whole image, never body parts.
+exports.WHOLE_FRAME = { width: 256, height: 384, columns: 4, sheetWidth: 1024, sheetHeight: 1536, viewX: 12, viewY: 16, viewWidth: 232, viewHeight: 368 };
+exports.WHOLE_OFFSETS = [
+    {
+        "dx": 0,
+        "dy": 0
+    },
+    {
+        "dx": 3.843,
+        "dy": 0.583
+    },
+    {
+        "dx": 3.563,
+        "dy": 0.677
+    },
+    {
+        "dx": 6.745,
+        "dy": 0.827
+    },
+    {
+        "dx": -0.372,
+        "dy": 10.819
+    },
+    {
+        "dx": 2.128,
+        "dy": 10.871
+    },
+    {
+        "dx": 2.201,
+        "dy": 10.786
+    },
+    {
+        "dx": 7.111,
+        "dy": 10.625
+    },
+    {
+        "dx": -0.321,
+        "dy": 11.82
+    },
+    {
+        "dx": 2.295,
+        "dy": 11.537
+    },
+    {
+        "dx": 2.997,
+        "dy": 13.808
+    },
+    {
+        "dx": 6.868,
+        "dy": 12.724
+    },
+    {
+        "dx": 0.009,
+        "dy": 12.054
+    },
+    {
+        "dx": 2.908,
+        "dy": 11.775
+    },
+    {
+        "dx": 2.512,
+        "dy": 12.082
+    },
+    {
+        "dx": 7.269,
+        "dy": 12.46
+    }
+];
+exports.WHOLE_SEQUENCE = [
+    [0, 1600], [1, 110], [2, 110], [3, 110],
+    [5, 110], [6, 150], [5, 110], [4, 150], [5, 110], [6, 150], [5, 110],
+    [3, 110], [2, 110], [1, 110], [0, 900],
+    [13, 100], [14, 150], [13, 100], [0, 1900],
+];
+exports.WHOLE_CYCLE_MS = exports.WHOLE_SEQUENCE.reduce((sum, entry) => sum + entry[1], 0);
+function wholeFrameAt(elapsed) {
+    'worklet';
+    let remaining = Math.max(0, elapsed) % exports.WHOLE_CYCLE_MS;
+    for (const [frame, duration] of exports.WHOLE_SEQUENCE) {
+        if (remaining < duration)
+            return frame;
+        remaining -= duration;
+    }
+    return 0;
+}
+
+let playing=true,start=performance.now();function show(n){let o=exports.WHOLE_OFFSETS[n];document.querySelectorAll('.pose').forEach(e=>{e.setAttribute('x',-(n%4)*256+o.dx);e.setAttribute('y',-Math.floor(n/4)*384+o.dy)});document.querySelector('.time').textContent='Frame '+n}function stop(n){playing=false;show(n)}function tick(t){if(playing)show(exports.wholeFrameAt(t-start));requestAnimationFrame(tick)}requestAnimationFrame(tick)</script>

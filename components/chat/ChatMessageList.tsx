@@ -16,13 +16,12 @@ import type { MessageBlock } from '@/src/chat/message-data';
 
 type ChatScrollProps = ScrollViewProps & {
   chatRef: React.RefObject<ScrollView | null>;
-  isSpaceFull: boolean;
   onEndVisible: (visible: boolean) => void;
 };
 
 // Preserve FlatList's internal ref as well as a ref for keyboard-aware scrollToEnd.
 const ChatScroll = forwardRef<ScrollView, ChatScrollProps>(function ChatScroll(
-  { chatRef, isSpaceFull, onEndVisible, ...props }, ref,
+  { chatRef, onEndVisible, ...props }, ref,
 ) {
   const zeroPadding = useSharedValue(0);
   const assignRef = useCallback((instance: ScrollView | null) => {
@@ -35,7 +34,7 @@ const ChatScroll = forwardRef<ScrollView, ChatScrollProps>(function ChatScroll(
     <KeyboardChatScrollView
       {...props}
       ref={assignRef}
-      keyboardLiftBehavior={isSpaceFull ? 'whenAtEnd' : 'never'}
+      keyboardLiftBehavior="whenAtEnd"
       extraContentPadding={zeroPadding}
       automaticallyAdjustContentInsets={false}
       contentInsetAdjustmentBehavior="never"
@@ -81,6 +80,8 @@ export const ChatMessageList = memo(function ChatMessageList({
   const scrollRef = useRef<ScrollView | null>(null);
   const listRef = useRef<FlatList<MessageBlock> | null>(null);
   const blocks = useMemo(() => messages.flatMap(messageBlocks), [messages]);
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
   const blocksRef = useRef(blocks);
   blocksRef.current = blocks;
   const atEnd = useRef(true);
@@ -89,10 +90,16 @@ export const ChatMessageList = memo(function ChatMessageList({
   const pending = useRef<{ key: string; animated: boolean; attempts: number } | null>(null);
   const lastVisible = useRef<string | null>(null);
   const dragged = useRef(false);
+  const gestureActive = useRef(false);
+  const lastStreamingMessageId = useRef<string | null>(null);
   const olderLoadAllowed = useRef(false);
   const [played] = useState(() => new Set(messages.map((message) => message.id)));
   const newestOnMount = useRef(messages[messages.length - 1]);
   const markPlayed = useCallback((id: string) => { played.add(id); }, [played]);
+  const handleLongPress = useCallback((selection: SelectedMessage) => {
+    const current = messagesRef.current.find(item => item.id === selection.message.id);
+    onLongPressMessage(current ? { ...selection, message: current } : selection);
+  }, [onLongPressMessage]);
 
   const [listHeight, setListHeight] = useState(0);
   const [rawContentHeight, setRawContentHeight] = useState(0);
@@ -100,14 +107,18 @@ export const ChatMessageList = memo(function ChatMessageList({
 
   const currentKeyboardHeight = keyboardVisible ? Math.max(0, Math.abs(keyboardHeight)) : 0;
   // Available vertical room from top of screen to top edge of composer:
-  const composerTop = Math.max(0, listHeight - currentKeyboardHeight - composerHeight);
+  // Android's resize mode already removes the keyboard from the list viewport.
+  const composerTop = Math.max(0, listHeight - (Platform.OS === 'ios' ? currentKeyboardHeight : 0) - composerHeight);
   // Full when the bottom-most word/message reaches within 5px of the composer:
   const isSpaceFull = blocks.length > 0 && composerTop > 0 && rawContentHeight >= (composerTop - 5);
   // Lock scrolling when chat area is not full:
-  const canUserScroll = !contextMenuOpen && isSpaceFull;
+  const canUserScroll = !contextMenuOpen;
 
   const lastMessage = messages[messages.length - 1];
   const isStreaming = lastMessage?.role === 'assistant' && lastMessage?.status === 'streaming';
+  useLayoutEffect(() => {
+    if (isStreaming && lastMessage) lastStreamingMessageId.current = lastMessage.id;
+  }, [isStreaming, lastMessage?.id]);
 
   const scrollToBottom = useCallback((animated: boolean = true) => {
     if (frameRequest.current !== null) cancelAnimationFrame(frameRequest.current);
@@ -141,16 +152,17 @@ export const ChatMessageList = memo(function ChatMessageList({
     if (frameRequest.current !== null) cancelAnimationFrame(frameRequest.current);
   }, []);
 
-  // When space becomes full (e.g. streaming crosses 5px gap), initiate scroll
+  // Once the response fills the viewport, follow without starting a competing scroll animation.
   useEffect(() => {
-    if (isSpaceFull) {
-      if (isStreaming && (!dragged.current || atEnd.current)) {
-        scrollToBottom(true);
+    if (isSpaceFull && !keyboardVisible) {
+      if (isStreaming && !dragged.current) {
+        pending.current = null;
+        scrollToBottom(false);
       } else {
         resolveScroll();
       }
     }
-  }, [isSpaceFull, isStreaming, scrollToBottom, resolveScroll]);
+  }, [isSpaceFull, isStreaming, keyboardVisible, scrollToBottom, resolveScroll]);
 
   // Handle new message insertion
   useLayoutEffect(() => {
@@ -159,27 +171,20 @@ export const ChatMessageList = memo(function ChatMessageList({
       const initial = previousLastId.current === undefined;
       if (shouldFollowMessage(initial, last.role, atEnd.current)) {
         if (blocks.length > 0) {
-          pending.current = { key: blocks[blocks.length - 1].key, animated: !initial, attempts: 0 };
+          pending.current = { key: blocks[blocks.length - 1].key, animated: false, attempts: 0 };
         }
         dragged.current = false;
-        if (isSpaceFull) {
+        if (isSpaceFull && !keyboardVisible) {
           resolveScroll();
         }
       }
       previousLastId.current = last.id;
     }
-  }, [messages, blocks, isSpaceFull, resolveScroll]);
-
-  // Real-time follow during assistant streaming ONLY when content touches within 5px of composer
-  useLayoutEffect(() => {
-    if (isStreaming && isSpaceFull && (!dragged.current || atEnd.current)) {
-      scrollToBottom(false);
-    }
-  }, [isStreaming, isSpaceFull, lastMessage?.content, scrollToBottom]);
+  }, [messages, blocks, isSpaceFull, keyboardVisible, resolveScroll]);
 
   const onEndVisible = useCallback((visible: boolean) => {
     atEnd.current = visible;
-    if (visible) {
+    if (visible && !gestureActive.current) {
       dragged.current = false;
       setShowScrollDown(false);
     }
@@ -188,14 +193,14 @@ export const ChatMessageList = memo(function ChatMessageList({
   const onViewableItemsChanged = useCallback(({ viewableItems }: { viewableItems: ViewToken<MessageBlock>[] }) => {
     const last = blocksRef.current[blocksRef.current.length - 1];
     lastVisible.current = last && viewableItems.some((item) => item.key === last.key) ? last.key : null;
-    if (pending.current && lastVisible.current === pending.current.key && isSpaceFull) {
+    if (pending.current && lastVisible.current === pending.current.key && isSpaceFull && !keyboardVisible) {
       resolveScroll();
     }
-  }, [resolveScroll, isSpaceFull]);
+  }, [resolveScroll, isSpaceFull, keyboardVisible]);
 
   const renderScroll = useCallback((props: ScrollViewProps) => (
-    <ChatScroll {...props} chatRef={scrollRef} isSpaceFull={isSpaceFull} onEndVisible={onEndVisible} />
-  ), [isSpaceFull, onEndVisible]);
+    <ChatScroll {...props} chatRef={scrollRef} onEndVisible={onEndVisible} />
+  ), [onEndVisible]);
 
   const renderItem = useCallback(({ item }: { item: MessageBlock }) => (
     <ChatMessage
@@ -205,9 +210,9 @@ export const ChatMessageList = memo(function ChatMessageList({
       animateEntrance={!item.segmented && !played.has(item.message.id)
         && (!newestOnMount.current || compareMessages(item.message, newestOnMount.current) > 0)}
       onEntrancePlayed={markPlayed}
-      onLongPress={onLongPressMessage}
+      onLongPress={handleLongPress}
     />
-  ), [bouncingMessageId, markPlayed, played, onLongPressMessage]);
+  ), [bouncingMessageId, markPlayed, played, handleLongPress]);
 
   return (
     <View style={styles.root}>
@@ -236,7 +241,7 @@ export const ChatMessageList = memo(function ChatMessageList({
           {
             justifyContent: 'flex-start',
             paddingTop: headerHeight + 20,
-            paddingBottom: isSpaceFull ? (composerHeight + 16) : 0,
+            paddingBottom: composerHeight + 16,
           },
         ]}
         keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
@@ -244,27 +249,40 @@ export const ChatMessageList = memo(function ChatMessageList({
         scrollEnabled={canUserScroll}
         bounces={isSpaceFull}
         onContentSizeChange={(w, h) => {
-          const currentPaddingBottom = isSpaceFull ? (composerHeight + 16) : 0;
+          const currentPaddingBottom = composerHeight + 16;
           const rawHeight = Math.max(0, h - currentPaddingBottom);
           setRawContentHeight(rawHeight);
-          if (isSpaceFull) {
-            if (isStreaming && (!dragged.current || atEnd.current)) {
+          if (isSpaceFull && !keyboardVisible) {
+            if ((isStreaming || lastStreamingMessageId.current === lastMessage?.id) && !dragged.current) {
+              pending.current = null;
               scrollToBottom(false);
             } else {
               resolveScroll();
             }
           }
+          if (!isStreaming) lastStreamingMessageId.current = null;
         }}
         onScrollBeginDrag={() => {
           pending.current = null;
           dragged.current = true;
+          gestureActive.current = true;
           olderLoadAllowed.current = true;
           if (frameRequest.current !== null) cancelAnimationFrame(frameRequest.current);
+        }}
+        onScrollEndDrag={() => {
+          gestureActive.current = false;
+          if (atEnd.current) dragged.current = false;
+        }}
+        onMomentumScrollBegin={() => { gestureActive.current = true; }}
+        onMomentumScrollEnd={() => {
+          gestureActive.current = false;
+          if (atEnd.current) dragged.current = false;
         }}
         onScroll={(event) => {
           const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
           const distanceToBottom = contentSize.height - (contentOffset.y + layoutMeasurement.height);
-          if (isSpaceFull && distanceToBottom > 120) {
+          if (gestureActive.current) atEnd.current = distanceToBottom <= 40;
+          if (isSpaceFull && dragged.current && distanceToBottom > 120) {
             setShowScrollDown(true);
           } else if (distanceToBottom <= 40) {
             setShowScrollDown(false);
@@ -288,6 +306,8 @@ export const ChatMessageList = memo(function ChatMessageList({
           accessibilityRole="button"
           hitSlop={8}
           onPress={() => {
+            dragged.current = false;
+            atEnd.current = true;
             scrollToBottom(true);
             setShowScrollDown(false);
           }}

@@ -27,6 +27,13 @@ export async function getPendingSchedule(db: SQLiteDatabase, conversationId: str
         ? value.changes as Partial<ScheduleDraft> : {},
       candidateIds: value.candidateIds.filter((id): id is string => typeof id === 'string'), updatedAt: row.updated_at };
   }
+  if (value.kind === 'delete' && (value.targetId === null || typeof value.targetId === 'string')
+    && (value.targetQuery === null || typeof value.targetQuery === 'string') && Array.isArray(value.candidateIds)) {
+    return { kind: 'delete', id: row.action_id, conversationId, stage: row.stage,
+      targetId: value.targetId as string | null, targetQuery: value.targetQuery as string | null,
+      snapshot: value.snapshot && typeof value.snapshot === 'object' ? value.snapshot as Schedule : null,
+      candidateIds: value.candidateIds.filter((id): id is string => typeof id === 'string'), updatedAt: row.updated_at };
+  }
   // Version 4 stored a single draft directly. Keep that proposal after upgrade.
   if (value.kind !== undefined) return null;
   const draft = parseScheduleDraft(row.draft_json);
@@ -44,4 +51,29 @@ export async function putPendingSchedule(db: SQLiteDatabase, pending: PendingSch
 
 export async function clearPendingSchedule(db: SQLiteDatabase, conversationId: string, actionId: string) {
   await db.runAsync('DELETE FROM pending_schedule_actions WHERE conversation_id = ? AND action_id = ?', conversationId, actionId);
+}
+
+async function ensureListContext(db: SQLiteDatabase) {
+  await db.execAsync(`CREATE TABLE IF NOT EXISTS chat_calendar_list_context (
+    conversation_id TEXT PRIMARY KEY NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    ids_json TEXT NOT NULL, updated_at INTEGER NOT NULL
+  )`);
+}
+
+export async function putScheduleListContext(db: SQLiteDatabase, conversationId: string, ids: string[]) {
+  await ensureListContext(db);
+  await db.runAsync(`INSERT INTO chat_calendar_list_context (conversation_id, ids_json, updated_at)
+    VALUES (?, ?, ?) ON CONFLICT(conversation_id) DO UPDATE SET
+    ids_json=excluded.ids_json, updated_at=excluded.updated_at`, conversationId, JSON.stringify(ids.slice(0, 30)), Date.now());
+}
+
+export async function getScheduleListContext(db: SQLiteDatabase, conversationId: string): Promise<string[]> {
+  await ensureListContext(db);
+  const row = await db.getFirstAsync<{ ids_json: string }>(
+    'SELECT ids_json FROM chat_calendar_list_context WHERE conversation_id = ?', conversationId);
+  if (!row) return [];
+  try {
+    const ids: unknown = JSON.parse(row.ids_json);
+    return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === 'string').slice(0, 30) : [];
+  } catch { return []; }
 }

@@ -1,4 +1,14 @@
 export const PH_ZONE = 'Asia/Manila';
+const formatters = new Map<string, Intl.DateTimeFormat>();
+function formatter(options: Intl.DateTimeFormatOptions) {
+  const key = JSON.stringify(options);
+  let value = formatters.get(key);
+  if (!value) {
+    value = new Intl.DateTimeFormat('en-PH', { ...options, timeZone: PH_ZONE });
+    formatters.set(key, value);
+  }
+  return value;
+}
 const DAY = 86400000;
 const OFFSET = 8 * 3600000;
 export function phDateKey(now = Date.now()) { return new Date(now + OFFSET).toISOString().slice(0, 10); }
@@ -36,13 +46,13 @@ export function monthCells(today: string) {
   return cells;
 }
 export function dayLabel(day: string, options: Intl.DateTimeFormatOptions) {
-  return new Intl.DateTimeFormat('en-PH', { ...options, timeZone: PH_ZONE }).format(phTimestamp(day, 12, 0));
+  return formatter(options).format(phTimestamp(day, 12, 0));
 }
 export function timeLabel(timestamp: number) {
-  return new Intl.DateTimeFormat('en-PH', { hour: 'numeric', minute: '2-digit', timeZone: PH_ZONE }).format(timestamp);
+  return formatter({ hour: 'numeric', minute: '2-digit' }).format(timestamp);
 }
 export function scheduleTimeParts(timestamp: number) {
-  const parts = new Intl.DateTimeFormat('en-PH', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: PH_ZONE }).formatToParts(timestamp);
+  const parts = formatter({ hour: 'numeric', minute: '2-digit', hour12: true }).formatToParts(timestamp);
   const part = (type: string) => parts.find(item => item.type === type)?.value ?? '';
   return { time: `${part('hour')}:${part('minute')}`, period: part('dayPeriod').toUpperCase() };
 }

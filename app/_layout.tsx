@@ -21,6 +21,7 @@ import {
 import { useColorScheme } from '@/components/useColorScheme';
 import Colors from '@/constants/Colors';
 import { enableForegroundReminders } from '@/src/calendar/reminders';
+import { ContentProvider } from '@/src/others/ContentProvider';
 
 export {
   // Catch any errors thrown by the Layout component.
@@ -95,7 +96,7 @@ function RootLayoutNav() {
 
   return (
     <KeyboardProvider preload={false}>
-      <ThemeProvider value={navigationTheme}>
+      <ContentProvider><ThemeProvider value={navigationTheme}>
         <StatusBar
           backgroundColor="transparent"
           barStyle={colors.statusBar === 'dark' ? 'dark-content' : 'light-content'}
@@ -123,8 +124,11 @@ function RootLayoutNav() {
               headerTitleStyle: { fontFamily: 'IBMPlexMono_600SemiBold' },
             }}
           />
+          <Stack.Screen name="weather" options={{ headerShown: false, contentStyle: { backgroundColor: '#F7FAF4' } }} />
+          <Stack.Screen name="market-prices" options={{ headerShown: false, contentStyle: { backgroundColor: '#F7FAF4' } }} />
+          <Stack.Screen name="almanac" options={{ headerShown: false, contentStyle: { backgroundColor: '#F7FAF4' } }} />
         </Stack>
-      </ThemeProvider>
+      </ThemeProvider></ContentProvider>
     </KeyboardProvider>
   );
 }

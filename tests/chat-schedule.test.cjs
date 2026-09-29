@@ -6,12 +6,14 @@ const { isScheduleIntent, scheduleReply, parseScheduleDraft, draftProblem, sched
   scheduleSummary, scheduleExtractionPrompt, relativePhilippineDay, scheduleSavedMessage,
   calendarIntent, parseCalendarIntent, parseScheduleDrafts, scheduleBulkSummary, resolveScheduleDay,
   scheduleListMessage, parseEditExtraction, draftFromSchedule, scheduleDraftDiffers,
-  matchingScheduleTargets, scheduleLanguageForText, parseScheduleCommand, parseScheduleLines,
+  matchingScheduleTargets, scheduleLanguageForText, parseScheduleCommand, parseScheduleLines, isStructuredScheduleInput,
   scheduleLineSummary, parseNumberedScheduleChange, parseDirectReviewChange,
   parseScheduleReviewChange, scheduleReviewChangePrompt, parseScheduleReviewFeedback,
-  scheduleReviewPrompt } = require('../src/calendar/chat-schedule.ts');
-const { getPendingSchedule, putPendingSchedule } = require('../src/calendar/schedule-chat-store.ts');
+  scheduleReviewPrompt, scheduleListRange, numberedScheduleListMessage, referencedScheduleNumber,
+  parseDeleteExtraction, scheduleDeleteSummary } = require('../src/calendar/chat-schedule.ts');
+const { getPendingSchedule, putPendingSchedule, getScheduleListContext, putScheduleListContext } = require('../src/calendar/schedule-chat-store.ts');
 const { insertScheduleBatch, listSchedules } = require('../src/calendar/schedule-store.ts');
+const { parseMarkdown } = require('../src/chat/markdown.ts');
 
 function database() {
   const raw = new DatabaseSync(':memory:');
@@ -57,6 +59,8 @@ test('model output is validated, corrected fields merge, and missing values cann
   assert.equal(parseScheduleDraft('{"day":"2026-02-30"}', first), null);
   assert.equal(draftProblem(parseScheduleDraft('{"title":"Task","day":null,"time":null}')), 'date');
   assert.match(scheduleSummary(first), /Water tomatoes/);
+  assert.match(scheduleSummary({ ...first, time: null }), /Water tomatoes/);
+  assert.match(scheduleSummary({ ...first, time: null }), /Time needed/);
   assert.match(scheduleSavedMessage('Water tomatoes', 'en'), /saved to your calendar/);
   assert.match(scheduleExtractionPrompt('tomorrow', first, Date.parse('2026-09-25T00:00:00Z')), /2026-09-25/);
   assert.equal(scheduleFromDraft('schedule-1', first).id, 'schedule-1');
@@ -76,7 +80,7 @@ test('pending proposals survive migration and disappear with their conversation'
     const linePending = { ...pending, format: 'lines', updatedAt: 4 };
     await putPendingSchedule(db, linePending);
     assert.deepEqual(await getPendingSchedule(db, 'c'), linePending);
-    assert.equal(db.raw.prepare('PRAGMA user_version').get().user_version, 4);
+    assert.equal(db.raw.prepare('PRAGMA user_version').get().user_version, 5);
     await insertConversation(db, { id: 'old', title: 'Old chat', createdAt: 1, updatedAt: 1 });
     db.raw.prepare(`INSERT INTO pending_schedule_actions (conversation_id, action_id, stage, draft_json, updated_at)
       VALUES (?, ?, ?, ?, ?)`).run('old', 'old-schedule', 'confirming', JSON.stringify(draft), 4);
@@ -102,7 +106,13 @@ test('calendar intent routes creation, lookup, and edits without hijacking farmi
   assert.equal(calendarIntent('What is the schedule for crop rotation?'), 'ambiguous');
   assert.equal(calendarIntent('I want to water tomatoes every day at 6 AM'), 'ambiguous');
   assert.equal(parseCalendarIntent('{"intent":"edit"}'), 'edit');
-  assert.equal(parseCalendarIntent('{"intent":"delete"}'), null);
+  assert.equal(parseCalendarIntent('{"intent":"delete"}'), 'delete');
+  assert.equal(calendarIntent('Delete my watering schedule'), 'delete');
+  assert.equal(calendarIntent('Remove feed chickens'), 'ambiguous');
+  assert.equal(calendarIntent('Move #2 to 9 AM'), 'edit');
+  assert.equal(calendarIntent('Show my schedules at 6 AM and 8 AM'), 'list');
+  assert.equal(calendarIntent('Move my watering schedule from 6 AM to 8 AM'), 'edit');
+  assert.equal(calendarIntent('Tomorrow water tomatoes at 6 AM and feed chickens at 8 AM'), 'create');
 });
 
 test('bulk extraction retains separate times, rejects malformed batches, and reviews all items', () => {
@@ -126,12 +136,15 @@ test('dot is excluded and slash commands route without taking over ordinary punc
   assert.equal(parseScheduleCommand('. edit Water tomatoes to 7am'), null);
   assert.deepEqual(parseScheduleCommand('/sched view Thursday'), { action: 'list', body: 'Thursday' });
   assert.deepEqual(parseScheduleCommand('/sched add 6am Water'), { action: 'create', body: '6am Water' });
+  assert.deepEqual(parseScheduleCommand('/sched delete Water'), { action: 'delete', body: 'Water' });
   assert.equal(parseScheduleCommand('Hello. Schedule watering'), null);
   assert.equal(parseScheduleCommand('.Hello'), null);
 });
 
 test('schedule lines preserve every item, PH defaults, and numbered correction', () => {
   const now = Date.parse('2026-09-25T00:00:00Z');
+  assert.equal(isStructuredScheduleInput('6am, Water tomatoes\n8am, Feed chickens'), true);
+  assert.equal(isStructuredScheduleInput('Water tomatoes tomorrow at 6am\nFeed chickens tomorrow at 8am'), false);
   const parsed = parseScheduleLines('1. 6am, "hello world baby"\n2. 7am, tomorrow "yes baby koo" reminder on\n3. Thursday, 4:30 PM | Check leaves | repeat weekly', now);
   assert.deepEqual(parsed.errors, []);
   assert.deepEqual(parsed.drafts.map(item => [item.title, item.day, item.time, item.reminder, item.repeatKind]), [
@@ -187,7 +200,7 @@ test('review replies patch only the requested schedules and always return to rev
     ['Water tomatoes', '2026-09-25', '18:00', true],
     ['Feed chickens', '2026-09-26', '20:00', true],
   ]);
-  assert.match(scheduleReviewChangePrompt('reminder on for both', drafts, now), /not confirmation/);
+  assert.match(scheduleReviewChangePrompt('reminder on for both', drafts, now), /even after saying yes\/correct/);
 });
 
 test('ambiguous and invalid review patches leave the original proposal untouched', () => {
@@ -270,10 +283,9 @@ test('semantic review feedback handles contrasting settings like 1 and 2 on and 
   ];
   const rawUpdate = JSON.stringify({
     intent: 'update',
-    items: [
-      { title: 'Water tomatoes', day: '2026-09-25', time: '06:00', reminder: true, repeatKind: 'none' },
-      { title: 'Feed chickens', day: '2026-09-25', time: '07:00', reminder: true, repeatKind: 'none' },
-      { title: 'Harvest chili', day: '2026-09-25', time: '17:00', reminder: false, repeatKind: 'none' },
+    operations: [
+      { action: 'change', targets: [1, 2], changes: { reminder: true } },
+      { action: 'change', targets: [3], changes: { reminder: false } },
     ],
   });
   const result = parseScheduleReviewFeedback(rawUpdate, drafts);
@@ -281,9 +293,104 @@ test('semantic review feedback handles contrasting settings like 1 and 2 on and 
   assert.equal(result.drafts[0].reminder, true);
   assert.equal(result.drafts[1].reminder, true);
   assert.equal(result.drafts[2].reminder, false);
+  assert.equal(parseScheduleReviewFeedback(JSON.stringify({ intent: 'update', items: drafts }), drafts), null);
 
   assert.deepEqual(parseScheduleReviewFeedback('{"intent":"confirm"}', drafts), { kind: 'confirm' });
   assert.deepEqual(parseScheduleReviewFeedback('{"intent":"cancel"}', drafts), { kind: 'cancel' });
   assert.match(scheduleReviewPrompt('make 1 and 2 reminder on and 3 off', drafts), /unsaved schedule/);
 });
+
+test('review operations preserve untouched schedules and support removal and addition', () => {
+  const now = Date.parse('2026-09-25T00:00:00Z');
+  const drafts = parseScheduleLines('6pm, "Water tomatoes"\n7pm, "Feed chickens"', now).drafts;
+  const reply = parseScheduleReviewFeedback(JSON.stringify({ intent: 'update', operations: [
+    { action: 'change', targets: [1], changes: { reminder: true } },
+    { action: 'remove', targets: [2] },
+    { action: 'add', item: { title: 'Check field', day: '2026-09-26', time: '08:00', reminder: false } },
+  ] }), drafts, now);
+  assert.equal(reply.kind, 'updated');
+  assert.deepEqual(reply.drafts.map(item => [item.title, item.time, item.reminder]), [
+    ['Water tomatoes', '18:00', true], ['Check field', '08:00', false],
+  ]);
+  assert.deepEqual(drafts.map(item => item.reminder), [false, false]);
+  assert.equal(parseScheduleReviewFeedback(JSON.stringify({ intent: 'update', operations: [
+    { action: 'remove', targets: 'all' },
+  ] }), drafts, now), null);
+  assert.equal(parseScheduleReviewFeedback(JSON.stringify({ intent: 'update', operations: [
+    { action: 'change', targets: [3], changes: { time: '09:00' } },
+  ] }), drafts, now), null);
+  assert.equal(parseScheduleReviewFeedback(JSON.stringify({ intent: 'update', operations: [
+    { action: 'add', item: { title: 'Check field', day: '2026-09-26', time: '08:00', reminder: 'banana' } },
+  ] }), drafts, now), null);
+});
+
+test('numbered calendar lists preserve selection across chat reloads', async () => {
+  const db = database();
+  try {
+    await migrateChatDatabase(db);
+    await insertConversation(db, { id: 'list-chat', title: 'Calendar', createdAt: 1, updatedAt: 1 });
+    await putScheduleListContext(db, 'list-chat', ['series-a', 'series-b']);
+    assert.deepEqual(await getScheduleListContext(db, 'list-chat'), ['series-a', 'series-b']);
+    assert.equal(referencedScheduleNumber('Move #2 to 9 AM'), 2);
+    assert.equal(referencedScheduleNumber('delete the second one'), 2);
+    assert.equal(referencedScheduleNumber('2'), 2);
+    assert.equal(parseDeleteExtraction('{"target":"Feed chickens"}'), 'Feed chickens');
+    const now = Date.parse('2026-09-25T00:00:00Z');
+    assert.deepEqual(scheduleListRange('this week', now), { from: '2026-09-21', to: '2026-09-27' });
+    assert.deepEqual(scheduleListRange('next 7 days', now), { from: '2026-09-25', to: '2026-10-01' });
+    assert.deepEqual(scheduleListRange('all my schedules', now), { from: '2026-09-25', to: '2026-10-24' });
+    const item = { id: 'series-a', seriesId: 'series-a', title: 'Water tomatoes', day: '2026-09-26',
+      at: Date.parse('2026-09-25T22:00:00Z'), reminder: 0, repeatKind: 'none', intervalDays: 1 };
+    assert.match(numberedScheduleListMessage('2026-09-26', '2026-09-26', [item], now), /1\. \*\*Water tomatoes\*\*/);
+    assert.match(scheduleDeleteSummary({ ...item, repeatKind: 'weekly' }), /entire weekly series/);
+    const pendingDelete = { kind: 'delete', id: 'remove-1', conversationId: 'list-chat', stage: 'confirming',
+      targetId: 'series-a', snapshot: item, targetQuery: 'Water tomatoes', candidateIds: [], updatedAt: now };
+    await putPendingSchedule(db, pendingDelete);
+    assert.deepEqual(await getPendingSchedule(db, 'list-chat'), pendingDelete);
+    db.raw.exec("PRAGMA foreign_keys = ON; DELETE FROM conversations WHERE id = 'list-chat';");
+    assert.deepEqual(await getScheduleListContext(db, 'list-chat'), []);
+  } finally { db.raw.close(); }
+});
+
+test('parseScheduleDrafts handles SLM greetings, conversational text, and repeated JSON blocks', () => {
+  const slmOutput = 'Hello! How can I assist you today with your agriculture, technology, science, or any other problem-solving needs? ' +
+    '{"items":[{"title":"Larga na kay muskwela","day":"2026-09-29","time":"09:00","reminder":true,"repeatKind":"none","language":"en"},' +
+    '{"title":"presentation","day":"2026-09-29","time":"22:00","reminder":true,"repeatKind":"none","language":"en"}]}' +
+    '{"items":[{"title":"Larga na kay muskwela","day":"2026-09-29","time":"09:00","reminder":true,"repeatKind":"none","language":"en"},' +
+    '{"title":"presentation","day":"2026-09-29","time":"22:00","reminder":true,"repeatKind":"none","language":"en"}]}';
+
+  const drafts = parseScheduleDrafts(slmOutput);
+  assert.ok(drafts);
+  assert.equal(drafts.length, 2);
+  assert.equal(drafts[0].title, 'Larga na kay muskwela');
+  assert.equal(drafts[0].time, '09:00');
+  assert.equal(drafts[0].reminder, true);
+  assert.equal(drafts[1].title, 'presentation');
+  assert.equal(drafts[1].time, '22:00');
+  assert.equal(drafts[1].reminder, true);
+
+  const summary = scheduleBulkSummary(drafts);
+  assert.match(summary, /Larga na kay muskwela/);
+  assert.match(summary, /presentation/);
+  assert.match(summary, /09:00/);
+  assert.match(summary, /22:00/);
+});
+
+test('Markdown tables generate compact content-aware column widths', () => {
+  const table = '| # | Task | When | Repeat | Reminder |\n' +
+    '|---|---|---|---|---|\n' +
+    '| 1 | Larga na kay muskwela | 2026-09-29 09:00 PH | None | On |\n' +
+    '| 2 | presentation | 2026-09-29 22:00 PH | None | On |';
+  const nodes = parseMarkdown(table);
+  const tableNode = nodes.find(n => n.type === 'table');
+  assert.ok(tableNode);
+  assert.ok(tableNode.widths);
+  assert.equal(tableNode.widths.length, 5);
+  // Column 0 (#) should be compact 38px
+  assert.equal(tableNode.widths[0], 38);
+  // Repeat & Reminder columns should be compact (< 85px)
+  assert.ok(tableNode.widths[3] <= 85);
+  assert.ok(tableNode.widths[4] <= 85);
+});
+
 

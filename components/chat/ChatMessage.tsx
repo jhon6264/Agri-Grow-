@@ -15,6 +15,7 @@ import type { ChatMessage as ChatMessageType } from '@/src/chat/chat-types';
 import type { MessageBlock } from '@/src/chat/message-data';
 import { useReducedMotion } from 'react-native-reanimated';
 import { MarkdownResponse } from './MarkdownResponse';
+import { ChatDataCards } from './ChatDataCards';
 import { PhotoPreview } from './PhotoPreview';
 
 export type MessageFrame = {
@@ -96,12 +97,14 @@ export function ChatMessageSurface({ message, block }: ChatMessageSurfaceProps) 
   const first = block?.first ?? true;
   const last = block?.last ?? true;
   const content = block?.text ?? message.content;
+  const hasContent = Boolean(content && content.trim().length > 0);
 
   if (!userMessage) {
     const statusLabel = message.statusText || (message.attachment ? 'Viewing the image...' : 'Thinking...');
     return (
       <View style={[styles.aiSurface, !first && styles.noTopPadding, !last && styles.noBottomPadding]}>
-        {!content && message.status === 'streaming' ? (
+        {first && !!message.cards?.length && <ChatDataCards cards={message.cards} />}
+        {!hasContent && message.status === 'streaming' ? (
           <BreathingStatusLabel label={statusLabel} />
         ) : (
           <StreamFadeView>
@@ -119,21 +122,29 @@ export function ChatMessageSurface({ message, block }: ChatMessageSurfaceProps) 
 
   return (
     <View style={styles.userSurface}>
-      {last && <Svg
-        pointerEvents="none"
-        style={styles.userTail}
-        viewBox="0 0 20 20"
-        width={20}
-        height={20}>
-        <Path
-          d="M1 1 C2 8 7 14 19 16 C13 19 6 18 1 14 Z"
-          fill={Palette.forest}
-        />
-      </Svg>}
-      <View style={[styles.userBubble, !first && styles.continuedTop, !last && styles.continuedBottom]}>
-        {first && message.attachment && <PhotoPreview photo={message.attachment} />}
-        <Text style={[styles.messageText, styles.userMessageText]}>{content}</Text>
-      </View>
+      {first && message.attachment && (
+        <View style={[styles.attachedImageWrap, !hasContent && styles.attachedImageAlone]}>
+          <PhotoPreview photo={message.attachment} />
+        </View>
+      )}
+      {hasContent && (
+        <View style={styles.userBubbleWrapper}>
+          {last && <Svg
+            pointerEvents="none"
+            style={styles.userTail}
+            viewBox="0 0 20 20"
+            width={20}
+            height={20}>
+            <Path
+              d="M1 1 C2 8 7 14 19 16 C13 19 6 18 1 14 Z"
+              fill={Palette.forest}
+            />
+          </Svg>}
+          <View style={[styles.userBubble, !first && styles.continuedTop, !last && styles.continuedBottom]}>
+            <Text style={[styles.messageText, styles.userMessageText]}>{content}</Text>
+          </View>
+        </View>
+      )}
     </View>
   );
 }
@@ -206,18 +217,26 @@ export const ChatMessage = memo(function ChatMessage({ message, block, bounce, a
       </Pressable>
     </Animated.View>
   );
-}, (previous, next) =>
-  previous.message.id === next.message.id &&
-  previous.message.content === next.message.content &&
-  previous.message.role === next.message.role &&
-  previous.message.status === next.message.status &&
-  previous.message.attachment === next.message.attachment &&
-  previous.block === next.block &&
-  previous.bounce === next.bounce &&
-  previous.animateEntrance === next.animateEntrance &&
-  previous.onLongPress === next.onLongPress &&
-  previous.onEntrancePlayed === next.onEntrancePlayed,
-);
+}, (previous, next) => {
+  const left = previous.block;
+  const right = next.block;
+  const sameBlock = left === right || Boolean(left && right
+    && left.key === right.key && left.text === right.text && left.markdown === right.markdown
+    && left.first === right.first && left.last === right.last && left.segmented === right.segmented);
+  const activeBlock = !left || !right || left.last || right.last || previous.message.role === 'user';
+  return previous.message.id === next.message.id
+    && previous.message.role === next.message.role
+    && previous.message.attachment === next.message.attachment
+    && previous.message.cards === next.message.cards
+    && (!activeBlock || previous.message.content === next.message.content
+      && previous.message.status === next.message.status
+      && previous.message.statusText === next.message.statusText)
+    && sameBlock
+    && previous.bounce === next.bounce
+    && previous.animateEntrance === next.animateEntrance
+    && previous.onLongPress === next.onLongPress
+    && previous.onEntrancePlayed === next.onEntrancePlayed;
+});
 
 const styles = StyleSheet.create({
   wideUser: { width: '86%' },
@@ -247,6 +266,18 @@ const styles = StyleSheet.create({
     backgroundColor: 'transparent',
     position: 'relative',
     paddingRight: 4,
+    alignItems: 'flex-end',
+  },
+  attachedImageWrap: {
+    alignSelf: 'flex-end',
+    marginBottom: 6,
+  },
+  attachedImageAlone: {
+    marginBottom: 0,
+  },
+  userBubbleWrapper: {
+    position: 'relative',
+    alignSelf: 'flex-end',
   },
   userBubble: {
     zIndex: 1,

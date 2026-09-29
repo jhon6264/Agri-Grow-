@@ -27,7 +27,7 @@ test('non-destructive migration and stable 50-message cursor pages with timestam
     // Simulate the pre-index database and rerun the actual migration.
     db.raw.exec('DROP INDEX messages_conversation_cursor_idx; PRAGMA user_version=1;');
     await migrateChatDatabase(db);
-    assert.equal(db.raw.prepare('PRAGMA user_version').get().user_version, 4);
+    assert.equal(db.raw.prepare('PRAGMA user_version').get().user_version, 5);
     assert.equal(db.raw.prepare('SELECT COUNT(*) AS n FROM messages').get().n, 137);
     assert.ok(db.raw.prepare("SELECT name FROM sqlite_master WHERE name='messages_conversation_cursor_idx'").get());
     let page = await listMessages(db, 'a');
@@ -73,7 +73,7 @@ test('initialization shares concurrent work and retries a transient native datab
     await first;
     assert.equal(schemaAttempts, 3);
     assert.equal(db.raw.prepare('PRAGMA busy_timeout').get().timeout, 2500);
-    assert.equal(db.raw.prepare('PRAGMA user_version').get().user_version, 4);
+    assert.equal(db.raw.prepare('PRAGMA user_version').get().user_version, 5);
     await migrateChatDatabase(db);
     assert.equal(schemaAttempts, 3);
   } finally { db.raw.close(); }
@@ -133,6 +133,17 @@ test('display blocks reconstruct every character and retain the full copy source
       assert.ok(!/[\uD800-\uDBFF]$/.test(block.text));
     }
   }
+});
+
+test('streaming blocks reuse finished Markdown while the next paragraph grows', () => {
+  const first = { ...message(1, 'First paragraph.\n\nSecond'), status: 'streaming' };
+  const second = { ...first, content: 'First paragraph.\n\nSecond paragraph' };
+  const firstBlocks = messageBlocks(first);
+  const secondBlocks = messageBlocks(second);
+  assert.equal(firstBlocks.map(block => block.text).join(''), first.content);
+  assert.equal(secondBlocks.map(block => block.text).join(''), second.content);
+  assert.equal(secondBlocks[0].markdown, firstBlocks[0].markdown);
+  assert.equal(secondBlocks[0].key, firstBlocks[0].key);
 });
 
 test('follow latest only on opening, explicit send, or reply while at end', () => {

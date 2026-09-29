@@ -80,11 +80,6 @@ function ChatRow({
           onPress={onSelect}
           style={({ pressed }) => [styles.rowTitleButton, pressed && styles.pressed]}>
           <Text numberOfLines={1} style={styles.rowTitle}>{conversation.title}</Text>
-          {!!conversation.lastMessagePreview && (
-            <Text numberOfLines={1} style={[styles.rowPreview, { color: colors.textSecondary }]}>
-              {conversation.lastMessagePreview}
-            </Text>
-          )}
         </Pressable>
 
         <IconButton
@@ -464,7 +459,7 @@ const styles = StyleSheet.create({
   },
   rowMain: {
     backgroundColor: 'transparent',
-    minHeight: 60,
+    minHeight: 48,
     flexDirection: 'row',
     alignItems: 'center',
     paddingLeft: 10,
@@ -478,14 +473,8 @@ const styles = StyleSheet.create({
   },
   rowTitle: {
     fontFamily: Fonts.sansMedium,
-    fontSize: 16,
-    lineHeight: 22,
-  },
-  rowPreview: {
-    fontFamily: Fonts.sansRegular,
-    fontSize: 13,
-    lineHeight: 18,
-    marginTop: 1,
+    fontSize: 15,
+    lineHeight: 20,
   },
   rowMenu: {
     position: 'absolute',

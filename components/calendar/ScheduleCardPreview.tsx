@@ -15,26 +15,43 @@ const typedPrefix = (text: string, fraction: number) => {
   return characters.slice(0, Math.ceil(characters.length * Math.max(0, Math.min(1, fraction)))).join('');
 };
 
-export function ScheduleCardPreview({ items, now, contentWidth, onTitleHeight }: {
-  items: ScheduleOccurrence[]; now: number; contentWidth: number; onTitleHeight: (height: number) => void;
+export function ScheduleCardPreview({ items, now, contentWidth, onTitleHeight, playing = true }: {
+  items: ScheduleOccurrence[]; now: number; contentWidth: number; onTitleHeight?: (height: number) => void; playing?: boolean;
 }) {
   const reduce = useReducedMotion();
   const signature = items.map(item => `${item.id}:${item.at}:${item.title}`).join('|');
   const [shown, setShown] = useState<ScheduleOccurrence | null>(items[0] ?? null);
   const [incoming, setIncoming] = useState<ScheduleOccurrence | null>(null);
-  const [typedTitle, setTypedTitle] = useState('');
+  const [typedTitle, setTypedTitle] = useState(items[0]?.title ?? '');
   const currentIndex = useRef(0);
-  const measured = useRef<{ signature: string; heights: Map<number, number> }>({ signature: '', heights: new Map() });
-  const intro = useRef(new Animated.Value(reduce ? 1 : 0)).current;
+  const intro = useRef(new Animated.Value(1)).current;
   const roll = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     currentIndex.current = 0;
-    setShown(items[0] ?? null); setIncoming(null);
-    intro.stopAnimation(); roll.stopAnimation(); roll.setValue(0);
+    setShown(items[0] ?? null);
+    setIncoming(null);
+    intro.stopAnimation();
+    roll.stopAnimation();
+    roll.setValue(0);
     const title = items[0]?.title ?? '';
-    if (reduce) { intro.setValue(1); setTypedTitle(title); return; }
-    intro.setValue(0); setTypedTitle('');
+    if (!title) {
+      setTypedTitle('');
+      return;
+    }
+    if (!playing) {
+      // While card is settling / in motion, display title statically without firing 32ms setInterval loops
+      intro.setValue(1);
+      setTypedTitle(title);
+      return;
+    }
+    if (reduce) {
+      intro.setValue(1);
+      setTypedTitle(title);
+      return;
+    }
+    intro.setValue(0);
+    setTypedTitle('');
     Animated.timing(intro, { toValue: 1, duration: 500, useNativeDriver: true }).start();
     const started = Date.now();
     const typing = setInterval(() => {
@@ -42,21 +59,23 @@ export function ScheduleCardPreview({ items, now, contentWidth, onTitleHeight }:
       setTypedTitle(fraction === 1 ? title : typedPrefix(title, fraction));
       if (fraction === 1) clearInterval(typing);
     }, TYPE_TICK_MS);
-    return () => { clearInterval(typing); intro.stopAnimation(); };
-    // The signature changes only when the visible schedule set or its order changes.
-  }, [signature, reduce, intro, roll]);
+    return () => {
+      clearInterval(typing);
+      intro.stopAnimation();
+    };
+  }, [signature, reduce, intro, roll, playing]);
 
   useEffect(() => {
-    if (items.length < 2) return;
+    if (!playing || items.length < 2) return;
     const timer = setInterval(() => {
       currentIndex.current = (currentIndex.current + 1) % items.length;
       setIncoming(items[currentIndex.current]);
     }, PREVIEW_INTERVAL_MS);
     return () => clearInterval(timer);
-  }, [signature, items.length]);
+  }, [signature, items.length, playing]);
 
   useEffect(() => {
-    if (!incoming || !shown) return;
+    if (!playing || !incoming || !shown) return;
     const nextTitle = incoming.title;
     if (reduce) { setTypedTitle(nextTitle); setShown(incoming); setIncoming(null); return; }
     const oldTitle = shown.title;
@@ -73,7 +92,7 @@ export function ScheduleCardPreview({ items, now, contentWidth, onTitleHeight }:
       setShown(incoming); setIncoming(null); roll.setValue(0); setTypedTitle(nextTitle);
     }, ERASE_MS + TYPE_MS + TYPE_TICK_MS);
     return () => { clearInterval(typing); clearTimeout(finish); roll.stopAnimation(); };
-  }, [incoming, reduce, shown, roll]);
+  }, [incoming, reduce, shown, roll, playing]);
 
   if (!shown) return <Text style={styles.empty}>No schedules yet</Text>;
   const past = shown.at < now;
@@ -82,25 +101,14 @@ export function ScheduleCardPreview({ items, now, contentWidth, onTitleHeight }:
   const oldTime = incoming ? current.time.padStart(5, '0') : '';
   const newTime = next.time.padStart(5, '0');
   const phase = incoming ? roll : intro;
-  const measureTitle = (index: number, height: number) => {
-    if (measured.current.signature !== signature) measured.current = { signature, heights: new Map() };
-    measured.current.heights.set(index, height);
-    if (measured.current.heights.size === items.length) {
-      onTitleHeight(Math.max(...measured.current.heights.values()));
-    }
-  };
+
   return <View style={styles.preview} accessibilityLiveRegion="none">
     <View style={[styles.timeRow, past && styles.pastTimeRow]}>
       {Array.from(newTime).map((char, index) => <TimeDigit key={index} oldChar={oldTime[index]} newChar={char} phase={phase} />)}
       <Text style={styles.period}>{next.period}</Text>
       {past && <View pointerEvents="none" style={styles.timeStrike} />}
     </View>
-    <Text style={[styles.previewTitle, past && styles.pastPreviewTitle]}>{typedTitle || ' '}</Text>
-    <View pointerEvents="none" accessible={false} accessibilityElementsHidden importantForAccessibility="no-hide-descendants"
-      style={[styles.measureTitles, { width: contentWidth }]}>
-      {items.map((item, index) => <Text key={item.id} style={styles.measureTitle}
-        onLayout={event => measureTitle(index, event.nativeEvent.layout.height)}>{item.title}</Text>)}
-    </View>
+    <Text numberOfLines={2} style={[styles.previewTitle, past && styles.pastPreviewTitle]}>{typedTitle || ' '}</Text>
   </View>;
 }
 
@@ -122,9 +130,7 @@ const styles = StyleSheet.create({
   digit: { width: 19, height: 40, fontFamily: Fonts.monoSemiBold, fontSize: 28, lineHeight: 40, color: '#20432D', textAlign: 'center' },
   movingDigit: { position: 'absolute', left: 0, top: 0 }, colon: { width: 11 },
   period: { fontFamily: Fonts.sansSemiBold, fontSize: 14, lineHeight: 40, height: 40, color: '#285E3D', marginLeft: 8, textAlignVertical: 'center' },
-  previewTitle: { fontFamily: Fonts.sansMedium, fontSize: 16, lineHeight: 21, color: '#20432D', marginTop: 4 },
+  previewTitle: { fontFamily: Fonts.sansMedium, fontSize: 16, lineHeight: 21, color: '#20432D', marginTop: 4, minHeight: 42 },
   pastPreviewTitle: { color: '#788A7B', textDecorationLine: 'line-through' },
-  measureTitles: { position: 'absolute', left: 0, right: 0, top: 0, opacity: 0 },
-  measureTitle: { fontFamily: Fonts.sansMedium, fontSize: 16, lineHeight: 21 },
   empty: { fontFamily: Fonts.sansRegular, fontSize: 15, color: '#536758', marginTop: 18 },
 });

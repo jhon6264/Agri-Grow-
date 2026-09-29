@@ -1,0 +1,1 @@
+const fs=require('fs');const p='.expo-mascot-check/build-layer-preview.cjs';let s=fs.readFileSync(p,'utf8');s=s.replace('const s=Math.max(92,Math.min(116,Math.round(w*.29))),','const s=Math.max(92,Math.min(116,Math.round(w*.29)))*.85,');fs.writeFileSync(p,s);

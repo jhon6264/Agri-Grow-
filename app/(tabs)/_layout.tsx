@@ -25,6 +25,9 @@ import { ChatProvider, useChat } from '@/src/chat/ChatProvider';
 import { ChatSurfaceProvider } from '@/src/chat/ChatSurfaceContext';
 import { AiProvider, useAI } from '@/src/ai/AiProvider';
 import { AiSetupPanel } from '@/components/chat/AiSetupPanel';
+import { CalendarCornerMascot } from '@/components/calendar/CalendarCornerMascot';
+import { calendarCornerLayout } from '@/assets/mascot/calendar-corner-layout';
+import { resolveCurrentTab, type TabKey } from '@/src/navigation/tab-resolver';
 
 const navigationItems = [
   { label: 'Calendar', href: '/' as const, path: '/' },
@@ -55,6 +58,7 @@ function MainScaffold() {
   const { loading, messages } = useChat();
   const { blocked } = useAI();
   const { width } = useWindowDimensions();
+  const calendarMascot = calendarCornerLayout(width);
   const drawerWidth = Math.round(width * 0.7);
   const blurTargetRef = useRef<NativeView | null>(null);
   const glassTargetRef = useRef<NativeView | null>(null);
@@ -67,7 +71,13 @@ function MainScaffold() {
   const [drawerPrepared, setDrawerPrepared] = useState(false);
   const [headerHeight, setHeaderHeight] = useState(50);
   const [navigationBottom, setNavigationBottom] = useState(47);
-  const isChat = pathname === '/chat';
+  const currentTabRef = useRef<TabKey>('calendar');
+  const currentTab = resolveCurrentTab(pathname, currentTabRef.current);
+  currentTabRef.current = currentTab;
+  const isChat = currentTab === 'chat';
+  const isOthers = currentTab === 'others';
+  const isCalendar = currentTab === 'calendar' && (pathname === '/' || pathname === '/index' || pathname === '');
+  const background = isOthers ? '#F7FAF4' : colors.background;
   const introVisible = isChat && !loading && messages.length === 0;
   useEffect(() => {
     if (!isChat || loading || drawerPrepared) return;
@@ -177,13 +187,16 @@ function MainScaffold() {
               style={[
                 styles.segmentedControl,
                 {
-                  backgroundColor: isChat && !blocked ? 'transparent' : colors.surface,
-                  borderColor: isChat ? 'rgba(16, 24, 19, 0.12)' : colors.border,
+                  backgroundColor: (isChat && !blocked) || isOthers ? 'transparent' : colors.surface,
+                  borderColor: isChat || isOthers ? 'rgba(16, 24, 19, 0.12)' : colors.border,
                 },
               ]}>
-              {isChat && !blocked && <GlassSurface blurTarget={glassTargetRef} radius={10} suspended={drawerMounted} />}
+              {((isChat && !blocked) || isOthers) && <GlassSurface blurTarget={glassTargetRef} radius={10} suspended={drawerMounted} />}
               {navigationItems.map((item) => {
-                const active = pathname === item.path;
+                const active =
+                  (item.path === '/chat' && currentTab === 'chat') ||
+                  (item.path === '/others' && currentTab === 'others') ||
+                  (item.path === '/' && currentTab === 'calendar');
 
                 return (
                   <Pressable
@@ -208,12 +221,12 @@ function MainScaffold() {
             </View>
   );
   return (
-    <NativeView style={[styles.root, { backgroundColor: colors.background }]}>
+    <NativeView style={[styles.root, { backgroundColor: background }]}>
       <BlurTargetView
         ref={blurTargetRef}
         accessibilityElementsHidden={drawerMounted}
         importantForAccessibility={drawerMounted ? 'no-hide-descendants' : 'auto'}
-        style={styles.backgroundTarget}>
+        style={[styles.backgroundTarget, { backgroundColor: background }]}>
         <ChatSurfaceProvider
           drawerMounted={drawerMounted}
           blurTargetRef={blurTargetRef}
@@ -222,15 +235,12 @@ function MainScaffold() {
           navigationTop={insets.top + 3}
           navigationBottom={navigationBottom}
           introVisible={introVisible}>
-          {isChat && (
-            <View style={[styles.content, styles.chatContent]}><Slot /></View>
-          )}
           <View
             onLayout={(event) => setHeaderHeight(event.nativeEvent.layout.height)}
             style={[
               styles.navigationShell,
               { paddingTop: insets.top + 3 },
-              isChat ? styles.chatNavigationShell : styles.standardNavigationShell,
+              isChat || isOthers ? styles.chatNavigationShell : styles.standardNavigationShell,
             ]}>
             {isChat && (
               <Pressable
@@ -267,7 +277,14 @@ function MainScaffold() {
               style={{ opacity: isChat && blocked ? 0 : 1 }}>{navigationTabs}</NativeView>
           </View>
 
-          {!isChat && <View style={styles.content}><Slot /></View>}
+          <View style={[styles.content, isChat && styles.chatContent]}><Slot /></View>
+          {isCalendar && (
+            <NativeView pointerEvents="none" style={styles.calendarMascotOverlay}>
+              <NativeView style={{ position: 'absolute', top: navigationBottom - 26, right: 0 }}>
+                <CalendarCornerMascot active={!drawerMounted} size={calendarMascot.size} />
+              </NativeView>
+            </NativeView>
+          )}
         </ChatSurfaceProvider>
       </BlurTargetView>
 
@@ -351,6 +368,15 @@ const styles = StyleSheet.create({
   },
   standardNavigationShell: {
     backgroundColor: Palette.white,
+  },
+  calendarMascotOverlay: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    overflow: 'hidden',
+    zIndex: 10,
   },
   chatNavigationShell: {
     position: 'absolute',

@@ -1,0 +1,1 @@
+const fs=require('fs'),ts=require('typescript'),e={};new Function('exports',ts.transpileModule(fs.readFileSync('assets/mascot/calendar-peek-rig.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText)(e);fs.writeFileSync('.expo-mascot-check/poses.json',JSON.stringify({rig:e.PEEK_RIG,poses:Array.from({length:721},(_,i)=>e.peekPoseAt(i*10))}));

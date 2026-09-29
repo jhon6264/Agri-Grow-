@@ -1,15 +1,17 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AppState, BackHandler, FlatList, PanResponder, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { AppState, BackHandler, FlatList, PanResponder, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { useFocusEffect, useIsFocused, useRouter, type Href } from 'expo-router';
 import Animated, { Easing, useAnimatedStyle, useReducedMotion, useSharedValue, withTiming } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Circle, Path } from 'react-native-svg';
 import { CalendarCards, type CalendarLayout, type CalendarMode } from '@/components/calendar/CalendarCards';
+import { calendarCornerLayout } from '@/assets/mascot/calendar-corner-layout';
 import { dayLabel, frontFirst, monthCells, orderSchedulesForDay, phDateKey, phGreeting, scheduleTimeParts } from '@/src/calendar/calendar-time';
 import { listSchedules, type ScheduleOccurrence } from '@/src/calendar/schedule-store';
 import { reconcileScheduleReminders } from '@/src/calendar/reminders';
 import { useChatDatabase } from '@/src/database/ChatDatabaseProvider';
 import { Fonts } from '@/constants/Typography';
+import { useContent } from '@/src/others/ContentProvider';
 
 const layouts: CalendarLayout[] = ['vertical', 'wallet', 'month'];
 const scheduleTones = [
@@ -20,19 +22,70 @@ const scheduleTones = [
 ];
 const pastScheduleTone = { backgroundColor: '#EFF2EC', borderColor: '#D6DED5' };
 let preferredLayout: CalendarLayout = 'wallet';
+const ScheduleRowItem = memo(function ScheduleRowItem({ item, index, now, onSelect }: {
+  item: ScheduleOccurrence; index: number; now: number; onSelect: (seriesId: string) => void;
+}) {
+  const { time, period } = scheduleTimeParts(item.at);
+  const past = item.at < now;
+  const featured = !past && index === 0;
+  return <Pressable accessibilityRole="button" disabled={past} accessibilityState={{ disabled: past }}
+    accessibilityHint={past ? undefined : item.repeatKind === 'none' ? 'Edit or delete this schedule' : 'Edit or delete the repeating series'}
+    accessibilityLabel={`${item.title}, ${time} ${period}, reminder ${item.reminder ? 'on' : 'off'}${past ? ', past schedule' : ''}`}
+    onPress={() => onSelect(item.seriesId)}
+    style={[styles.scheduleRow, past ? pastScheduleTone : scheduleTones[Math.min(index, scheduleTones.length - 1)]]}>
+    <View style={styles.timeColumn}><Text style={[styles.time, featured && styles.featuredText, past && styles.pastText]}>{time}</Text><Text style={[styles.period, featured && styles.featuredText, past && styles.pastText]}>{period}</Text></View>
+    <Text style={[styles.scheduleTitle, featured && styles.featuredText, past && styles.pastText]}>{item.title}</Text>
+    <View style={[styles.clockIcon, past && styles.pastClock]} accessibilityElementsHidden importantForAccessibility="no">
+      <Svg width={24} height={24} viewBox="0 0 24 24" fill="none">
+        <Circle cx={12} cy={12} r={9} stroke={featured ? item.reminder ? '#FFFFFF' : '#AECBB6' : item.reminder ? '#285E3D' : '#849D89'} strokeWidth={1.8} />
+        <Path d="M12 7v5l3 2" stroke={featured ? item.reminder ? '#FFFFFF' : '#AECBB6' : item.reminder ? '#285E3D' : '#849D89'} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" />
+      </Svg>
+    </View>
+  </Pressable>;
+});
+
+const GreetingTitle = memo(function GreetingTitle({ greeting }: { greeting: string }) {
+  const reduce = useReducedMotion();
+  const [typed, setTyped] = useState(() => (reduce ? greeting : ''));
+
+  useFocusEffect(
+    useCallback(() => {
+      if (reduce) {
+        setTyped(greeting);
+        return;
+      }
+      let count = 0;
+      setTyped('');
+      const timer = setInterval(() => {
+        count++;
+        setTyped(greeting.slice(0, count));
+        if (count >= greeting.length) clearInterval(timer);
+      }, 38);
+      return () => clearInterval(timer);
+    }, [greeting, reduce]),
+  );
+
+  return <Text accessible={false} style={styles.greeting}>{typed || ' '}</Text>;
+});
+
 export default function CalendarScreen() {
   const db = useChatDatabase(); const router = useRouter(); const reduce = useReducedMotion();
+  const { content } = useContent();
   const focused = useIsFocused();
   const insets = useSafeAreaInsets(); const { width, height, fontScale } = useWindowDimensions();
   const [now, setNow] = useState(Date.now()); const today = phDateKey(now); const greeting = phGreeting(now);
   const [appActive, setAppActive] = useState(AppState.currentState === 'active');
-  const [typed, setTyped] = useState(''); const [layout, setLayout] = useState<CalendarLayout>(preferredLayout);
+  const [layout, setLayout] = useState<CalendarLayout>(preferredLayout);
   const [mode, setMode] = useState<CalendarMode>('compact'); const [selected, setSelected] = useState(today);
+  const [settledDay, setSettledDay] = useState(today);
+  const settling = !reduce && selected !== settledDay;
+  useEffect(() => {
+    const timer = setTimeout(() => setSettledDay(selected), reduce ? 0 : 400);
+    return () => clearTimeout(timer);
+  }, [selected, reduce]);
   const [schedules, setSchedules] = useState<ScheduleOccurrence[]>([]); const [error, setError] = useState('');
   const [loading, setLoading] = useState(true); const [reload, setReload] = useState(0);
   const [workHeight, setWorkHeight] = useState(height * 0.7);
-  const [measuredTitle, setMeasuredTitle] = useState<{ key: string; height: number } | null>(null);
-  const [measuredContent, setMeasuredContent] = useState<{ key: string; height: number } | null>(null);
   const spread = useSharedValue(0); const hidden = useSharedValue(0); const scrollY = useRef(0);
   const list = useRef<FlatList<ScheduleOccurrence>>(null);
   useFocusEffect(useCallback(() => {
@@ -47,21 +100,20 @@ export default function CalendarScreen() {
     });
     return () => { clearTimeout(timer); sub.remove(); };
   }, []));
-  useFocusEffect(useCallback(() => {
-    if (reduce) { setTyped(greeting); return; }
-    let count = 0; setTyped('');
-    const timer = setInterval(() => { count++; setTyped(greeting.slice(0, count)); if (count >= greeting.length) clearInterval(timer); }, 38);
-    return () => clearInterval(timer);
-  }, [greeting, reduce]));
   useEffect(() => { setSelected(today); }, [today]);
   useFocusEffect(useCallback(() => {
-    let live = true; setLoading(true); setError('');
-    const cards = frontFirst(selected); const cells = monthCells(today).filter((day): day is string => day !== null);
+    let live = true;
+    setLoading(previous => (schedules.length === 0 ? true : previous));
+    setError('');
+    const cards = frontFirst(today); const cells = monthCells(today).filter((day): day is string => day !== null);
     const from = [cards[0], cells[0]].sort()[0]; const to = [cards[6], cells[cells.length - 1]].sort().at(-1)!;
-    void listSchedules(db, from, to).then(items => { if (live) { setSchedules(items); void reconcileScheduleReminders(db).catch(() => undefined); } }, () => { if (live) setError('Unable to load schedules. Tap to retry.'); })
+    void listSchedules(db, from, to).then(items => { if (live) setSchedules(items); }, () => { if (live) setError('Unable to load schedules. Tap to retry.'); })
       .finally(() => { if (live) setLoading(false); });
     return () => { live = false; };
-  }, [db, today, selected, reload]));
+  }, [db, today, reload]));
+  useFocusEffect(useCallback(() => {
+    void reconcileScheduleReminders(db).catch(() => undefined);
+  }, [db, reload]));
   useEffect(() => {
     spread.value = withTiming(mode === 'spread' ? 1 : 0, { duration: reduce ? 0 : 330 });
     hidden.value = withTiming(mode === 'list' ? 1 : 0, { duration: reduce ? 0 : 360, easing: Easing.inOut(Easing.cubic) });
@@ -101,28 +153,18 @@ export default function CalendarScreen() {
     onPanResponderRelease: (_, g) => { if (g.dy > 35) setMode('compact'); },
   }), [mode]);
   const cardWidth = Math.max(180, width - 34);
-  const titleKey = `${selected}|${layout}|${cardWidth}|${fontScale}|${schedules.filter(item => item.day === selected)
-    .map(item => `${item.id}:${item.title}`).sort().join('|')}`;
-  const onTitleHeight = useCallback((titleHeight: number) => {
-    setMeasuredTitle(current => current?.key === titleKey && Math.abs(current.height - titleHeight) < 1
-      ? current : { key: titleKey, height: titleHeight });
-  }, [titleKey]);
-  const onContentHeight = useCallback((contentHeight: number) => {
-    setMeasuredContent(current => current?.key === titleKey && current.height >= contentHeight - 1
-      ? current : { key: titleKey, height: Math.max(current?.key === titleKey ? current.height : 0, contentHeight) });
-  }, [titleKey]);
-  const cardHeight = Math.max(216, Math.round(cardWidth / 1.586),
-    (measuredTitle?.key === titleKey ? measuredTitle.height : 0) + 154 * Math.max(1, fontScale),
-    (measuredContent?.key === titleKey ? measuredContent.height + 4 : 0));
+  const cornerMascot = calendarCornerLayout(width);
+  const cardHeight = Math.max(194, Math.round(Math.min(cardWidth / 1.85, 210) * Math.max(1, fontScale)));
   const compactGap = Math.max(8, Math.min(18, (workHeight - cardHeight - 150) / 6));
   const compactHeight = layout === 'month' ? 96 + monthCells(today).length / 7 * 38 : cardHeight + 6 * compactGap;
-  const spreadHeight = layout === 'month' ? compactHeight + 148 : Math.max(cardHeight + 6 * 20, workHeight - 42);
+  const monthPanelHeight = frontFirst(today).includes(selected) ? 172 : 148;
+  const spreadHeight = layout === 'month' ? compactHeight + monthPanelHeight : Math.max(cardHeight + 6 * 20, workHeight - 42);
   const compactHeightValue = useSharedValue(compactHeight);
   const spreadHeightValue = useSharedValue(spreadHeight);
   useEffect(() => {
-    compactHeightValue.value = withTiming(compactHeight, { duration: reduce ? 0 : 300 });
-    spreadHeightValue.value = withTiming(spreadHeight, { duration: reduce ? 0 : 300 });
-  }, [compactHeight, spreadHeight, compactHeightValue, spreadHeightValue, reduce]);
+    compactHeightValue.value = compactHeight;
+    spreadHeightValue.value = spreadHeight;
+  }, [compactHeight, spreadHeight, compactHeightValue, spreadHeightValue]);
   const calendarStyle = useAnimatedStyle(() => {
     const visible = 1 - hidden.value;
     return {
@@ -131,34 +173,48 @@ export default function CalendarScreen() {
     };
   }, []);
   const scheduleStyle = useAnimatedStyle(() => {
-    return { opacity: Math.max(0, Math.min(1, 1 - spread.value + hidden.value)),
-      transform: [{ translateY: spread.value * (1 - hidden.value) * workHeight }] };
+    return {
+      opacity: Math.max(0, Math.min(1, 1 - spread.value + hidden.value)),
+      transform: [{ translateY: spread.value * (1 - hidden.value) * workHeight }],
+    };
   }, [workHeight]);
   const items = useMemo(() => orderSchedulesForDay(schedules, selected, now), [schedules, selected, now]);
+  const onEditSchedule = useCallback((seriesId: string) => {
+    router.push({ pathname: '/add-schedule', params: { id: seriesId } } as Href);
+  }, [router]);
+  const renderScheduleRow = useCallback(({ item, index }: { item: ScheduleOccurrence; index: number }) => (
+    <ScheduleRowItem item={item} index={index} now={now} onSelect={onEditSchedule} />
+  ), [now, onEditSchedule]);
+  const onSelectDay = useCallback((day: string) => {
+    setSelected(day);
+    list.current?.scrollToOffset({ offset: 0, animated: false });
+  }, []);
   const add = () => router.push({ pathname: '/add-schedule', params: { day: selected } } as Href);
   return <View style={styles.screen}>
-    <Pressable accessibilityRole="button" accessibilityLabel={`${greeting}. Calendar layout: ${layout}. Tap to change layout.`}
-      accessibilityHint="Cycles vertical cards, wallet cards, and the current month"
-      onPress={() => { const next = layouts[(layouts.indexOf(layout) + 1) % layouts.length]; preferredLayout = next; setLayout(next); setSelected(today); setMode('compact'); }} style={styles.greetingArea}>
-      <Text accessible={false} style={styles.greeting}>{typed || ' '}</Text>
-    </Pressable>
-    <Pressable accessibilityRole="button" accessibilityLabel="Return to today" onPress={() => {
-      setSelected(today); list.current?.scrollToOffset({ offset: 0, animated: false }); setMode('compact');
-    }} style={styles.dateReset}>
-      <Text style={styles.subtitle}>{dayLabel(today, { weekday: 'long', month: 'long', day: 'numeric' })}  ↻</Text>
-    </Pressable>
+    <View style={styles.topArea}>
+      <Pressable accessibilityRole="button" accessibilityLabel={`${greeting}. Calendar layout: ${layout}. Tap to change layout.`}
+        accessibilityHint="Cycles vertical cards, wallet cards, and the current month"
+        onPress={() => { const next = layouts[(layouts.indexOf(layout) + 1) % layouts.length]; preferredLayout = next; setLayout(next); setSelected(today); setMode('compact'); }}
+        style={styles.greetingArea}>
+        <GreetingTitle greeting={greeting} />
+      </Pressable>
+      <Pressable accessibilityRole="button" accessibilityLabel="Return to today" onPress={() => {
+        setSelected(today); list.current?.scrollToOffset({ offset: 0, animated: false }); setMode('compact');
+      }} style={styles.dateReset}>
+        <Text style={styles.subtitle}>{dayLabel(today, { weekday: 'long', month: 'long', day: 'numeric' })}  ↻</Text>
+      </Pressable>
+    </View>
     <View style={styles.workArea} onLayout={event => {
       const next = event.nativeEvent.layout.height;
       setWorkHeight(current => Math.abs(current - next) > 2 ? next : current);
     }}>
       <Animated.View pointerEvents={mode === 'list' ? 'none' : 'auto'} accessibilityElementsHidden={mode === 'list'} importantForAccessibility={mode === 'list' ? 'no-hide-descendants' : 'auto'}
-        needsOffscreenAlphaCompositing={layout !== 'month'}
-        style={[styles.cardArea, calendarStyle]} {...cardGestures.panHandlers}>
+        style={[styles.cardArea, { overflow: mode === 'spread' ? 'visible' : 'hidden' }, calendarStyle]} {...cardGestures.panHandlers}>
         <CalendarCards today={today} selected={selected} layout={layout} mode={mode} spread={spread} hidden={hidden}
-          now={now} active={focused && appActive}
+          now={now} active={focused && appActive} settling={settling}
           cardWidth={cardWidth} cardHeight={cardHeight} compactGap={compactGap} spreadHeight={spreadHeight}
-          schedules={schedules} onTitleHeight={onTitleHeight} onContentHeight={onContentHeight}
-          onSelect={day => { setSelected(day); list.current?.scrollToOffset({ offset: 0, animated: false }); setMode('compact'); }} />
+          schedules={schedules} weather={content.weather}
+          onSelect={onSelectDay} />
       </Animated.View>
       <Pressable accessibilityRole="button" onPress={() => setMode(mode === 'compact' ? 'spread' : 'compact')} style={styles.handleButton}>
         <View style={styles.handle} /><Text style={styles.handleLabel}>{mode === 'compact' ? 'Spread calendar' : 'Back to calendar'}</Text>
@@ -171,36 +227,26 @@ export default function CalendarScreen() {
           </Pressable>
         </View>
         {!!error && <Pressable onPress={() => setReload(value => value + 1)} accessibilityRole="button"><Text style={styles.error}>{error}</Text></Pressable>}
-        <FlatList ref={list} data={items} keyExtractor={item => item.id} contentContainerStyle={{ paddingBottom: insets.bottom + 24, flexGrow: 1 }}
-          onScroll={event => { scrollY.current = event.nativeEvent.contentOffset.y; }} scrollEventThrottle={16}
+        <FlatList ref={list} data={items} keyExtractor={item => item.id}
+          contentContainerStyle={{ paddingBottom: insets.bottom + 24, flexGrow: 1 }}
+          onScroll={event => { scrollY.current = event.nativeEvent.contentOffset.y; }}
+          scrollEventThrottle={16}
+          initialNumToRender={8}
+          maxToRenderPerBatch={6}
+          windowSize={5}
+          removeClippedSubviews={Platform.OS === 'android'}
           ListEmptyComponent={<View style={styles.empty}>{loading ? <Text style={styles.emptyCopy}>Loading schedules…</Text> : <>
             <Text style={styles.emptyCopy}>No schedules for this day yet.</Text><Pressable accessibilityRole="button" onPress={add} style={styles.add}><Text style={styles.addText}>+ Add schedule</Text></Pressable></>}
           </View>}
-          renderItem={({ item, index }) => {
-            const { time, period } = scheduleTimeParts(item.at);
-            const past = item.at < now;
-            const featured = !past && index === 0;
-            return <Pressable accessibilityRole="button" disabled={past} accessibilityState={{ disabled: past }}
-              accessibilityHint={past ? undefined : item.repeatKind === 'none' ? 'Edit or delete this schedule' : 'Edit or delete the repeating series'}
-              accessibilityLabel={`${item.title}, ${time} ${period}, reminder ${item.reminder ? 'on' : 'off'}${past ? ', past schedule' : ''}`}
-              onPress={() => router.push({ pathname: '/add-schedule', params: { id: item.seriesId } } as Href)}
-              style={[styles.scheduleRow, past ? pastScheduleTone : scheduleTones[Math.min(index, scheduleTones.length - 1)]]}>
-              <View style={styles.timeColumn}><Text style={[styles.time, featured && styles.featuredText, past && styles.pastText]}>{time}</Text><Text style={[styles.period, featured && styles.featuredText, past && styles.pastText]}>{period}</Text></View>
-              <Text style={[styles.scheduleTitle, featured && styles.featuredText, past && styles.pastText]}>{item.title}</Text>
-              <View style={[styles.clockIcon, past && styles.pastClock]} accessibilityElementsHidden importantForAccessibility="no">
-                <Svg width={24} height={24} viewBox="0 0 24 24" fill="none">
-                  <Circle cx={12} cy={12} r={9} stroke={featured ? item.reminder ? '#FFFFFF' : '#AECBB6' : item.reminder ? '#285E3D' : '#849D89'} strokeWidth={1.8} />
-                  <Path d="M12 7v5l3 2" stroke={featured ? item.reminder ? '#FFFFFF' : '#AECBB6' : item.reminder ? '#285E3D' : '#849D89'} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" />
-                </Svg>
-              </View>
-            </Pressable>;
-          }} />
+          renderItem={renderScheduleRow} />
       </Animated.View>
     </View>
   </View>;
 }
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: '#FFFFFF', paddingHorizontal: 12 }, greetingArea: { paddingTop: 10 },
+  screen: { flex: 1, backgroundColor: '#FFFFFF', paddingHorizontal: 12, position: 'relative', overflow: 'visible' },
+    greetingArea: { paddingTop: 10 },
+  topArea: { position: 'relative', zIndex: 3 },
   greeting: { fontFamily: Fonts.sansBold, fontSize: 27, lineHeight: 36, color: '#20432D' },
   dateReset: { paddingBottom: 14, paddingTop: 3, alignSelf: 'flex-start' }, subtitle: { fontFamily: Fonts.sansRegular, fontSize: 13, color: '#647566', marginTop: 4 },
   workArea: { flex: 1, overflow: 'visible' }, cardArea: { overflow: 'visible', zIndex: 3 }, scheduleArea: { flex: 1, zIndex: 2, backgroundColor: '#FFFFFF' },

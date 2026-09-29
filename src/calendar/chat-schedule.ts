@@ -9,24 +9,27 @@ export type ScheduleDraft = {
 type PendingBase = { id: string; conversationId: string; stage: 'clarifying' | 'confirming'; updatedAt: number };
 export type PendingSchedule = (PendingBase & { kind: 'create'; drafts: ScheduleDraft[]; format?: 'lines' }) |
   (PendingBase & { kind: 'edit'; targetId: string | null; snapshot: Schedule | null;
-    draft: ScheduleDraft | null; changes: Partial<ScheduleDraft>; targetQuery: string | null; candidateIds: string[] });
-export type CalendarIntent = 'chat' | 'create' | 'list' | 'edit' | 'ambiguous';
+    draft: ScheduleDraft | null; changes: Partial<ScheduleDraft>; targetQuery: string | null; candidateIds: string[] }) |
+  (PendingBase & { kind: 'delete'; targetId: string | null; snapshot: Schedule | null;
+    targetQuery: string | null; candidateIds: string[] });
+export type CalendarIntent = 'chat' | 'create' | 'list' | 'edit' | 'delete' | 'ambiguous';
 export const MAX_BULK_SCHEDULES = 10;
-export type ScheduleCommand = { action: 'menu' | 'create' | 'list' | 'edit'; body: string };
+export type ScheduleCommand = { action: 'menu' | 'create' | 'list' | 'edit' | 'delete'; body: string };
 
 export function parseScheduleCommand(text: string): ScheduleCommand | null {
   const match = /^\/sched\b\s*([\s\S]*)$/i.exec(text.trim());
   if (!match) return null;
   const body = match[1].trim();
   if (!body) return { action: 'menu', body: '' };
-  const action = /^(add|create|list|view|edit)\b/i.exec(body);
+  const action = /^(add|create|list|view|edit|delete|remove)\b/i.exec(body);
   if (!action) return { action: 'create', body };
   const kind = action[1].toLowerCase();
-  return { action: kind === 'add' || kind === 'create' ? 'create' : kind === 'edit' ? 'edit' : 'list',
+  return { action: kind === 'add' || kind === 'create' ? 'create' : kind === 'edit' ? 'edit'
+    : kind === 'delete' || kind === 'remove' ? 'delete' : 'list',
     body: body.slice(action[0].length).trim() };
 }
 
-export const scheduleCommandHelp = `**Schedule commands**\n\n- **/sched add** followed by one schedule per line to create schedules.\n- **/sched list tomorrow** (or **/sched view Thursday**) to check a day.\n- **/sched edit** followed by a schedule title and change to review an edit.\n\nExample:\n\n\`\`\`text\n/sched add\n6am, "Water tomatoes" reminder on\n7am, tomorrow "Feed chickens"\n\`\`\`\n\nA missing day means today (PH); a missing reminder is off. Nothing is saved until you reply **Correct**.`;
+export const scheduleCommandHelp = `**Schedule commands**\n\n- **/sched add** followed by one schedule per line to create schedules.\n- **/sched list tomorrow** (or **/sched view Thursday**) to check a day.\n- **/sched edit** followed by a schedule title and change to review an edit.\n- **/sched delete** followed by a schedule title to review removal.\n\nExample:\n\n\`\`\`text\n/sched add\n6am, "Water tomatoes" reminder on\n7am, tomorrow "Feed chickens"\n\`\`\`\n\nA missing day means today (PH); a missing reminder is off. Nothing is saved until you reply **Correct**.`;
 
 const LINE_DAY = '(?:day after tomorrow|today|tomorrow|ngayon|bukas|karon|ugma|next\\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\\d{4}-\\d{2}-\\d{2})';
 const LINE_TIME = '(?:\\d{1,2}(?::[0-5]\\d)?\\s*(?:am|pm)|(?:[01]?\\d|2[0-3]):[0-5]\\d)';
@@ -148,8 +151,11 @@ User reply: ${JSON.stringify(message)}.
 Evaluate the user's feedback with common sense:
 1. If user confirms, agrees, or tells to save/proceed without changes: return {"intent":"confirm"}
 2. If user cancels, discards, or abandons: return {"intent":"cancel"}
-3. If user requests changes (e.g. reminders, times, dates, renames, removing an item, adding an item, contrasting settings like "1 and 2 on, 3 off"): return {"intent":"update","items":[...all resulting schedules reflecting their feedback...]}. A reply requesting changes is an update, not confirmation.
-Every item in items must have: "title", "day" (YYYY-MM-DD), "time" (24-hour HH:mm), "reminder" (boolean), "repeatKind" ("none"|"daily"|"weekly"|"interval"), "intervalDays" (integer).
+3. If user requests changes, even after saying yes/correct, return {"intent":"update","operations":[...]}. Operations are:
+   {"action":"change","targets":[1],"changes":{"time":"07:00"}} for only fields explicitly changed;
+   {"action":"remove","targets":[2]} to remove a reviewed item;
+   {"action":"add","item":{"title":"...","day":"YYYY-MM-DD","time":"HH:mm","reminder":false,"repeatKind":"none","intervalDays":1}} to add an item.
+   Targets use the displayed 1-based numbers; "all" is allowed. For "1 and 2 on, 3 off", emit two change operations. Never rewrite unchanged items. If an added item lacks a date or time, use null.
 4. If user asks a question or reply is completely unclear: return {"intent":"clarify","question":"short clarification"}
 
 Return ONLY valid JSON.`;
@@ -184,24 +190,62 @@ export function parseScheduleReviewFeedback(raw: string, drafts: ScheduleDraft[]
     return { kind: 'clarify', question };
   }
 
-  // State replacement (items)
-  if (Array.isArray(value.items) && value.items.length > 0 && value.items.length <= MAX_BULK_SCHEDULES) {
-    const defaultLanguage = drafts[0]?.language ?? 'en';
-    const parsedDrafts: ScheduleDraft[] = [];
-    for (let i = 0; i < value.items.length; i++) {
-      const item = value.items[i];
-      if (!item || typeof item !== 'object') return null;
-      const prev = drafts[i] ?? drafts[0];
-      const parsed = parseScheduleDraft(JSON.stringify(item), prev, now);
-      if (!parsed || !parsed.title) return null;
-      parsedDrafts.push({ ...parsed, language: defaultLanguage });
+  if (intent === 'update' && Array.isArray(value.operations)) {
+    if (!value.operations.length || value.operations.length > MAX_BULK_SCHEDULES * 2) return null;
+    const updated = drafts.map(draft => ({ ...draft }));
+    const removed = new Set<number>();
+    const added: ScheduleDraft[] = [];
+    const allowed = new Set(['title', 'day', 'time', 'reminder', 'repeatKind', 'intervalDays']);
+    for (const operation of value.operations) {
+      if (!operation || typeof operation !== 'object' || Array.isArray(operation)) return null;
+      const op = operation as Record<string, unknown>;
+      if (op.action === 'add') {
+        if (!op.item || typeof op.item !== 'object' || Array.isArray(op.item)) return null;
+        const source = op.item as Record<string, unknown>;
+        if (typeof source.title !== 'string' || !source.title.trim()) return null;
+        if (Object.keys(source).some(field => !['title', 'day', 'time', 'reminder', 'repeatKind', 'intervalDays', 'language'].includes(field))
+          || source.day !== undefined && source.day !== null && typeof source.day !== 'string'
+          || source.time !== undefined && source.time !== null && typeof source.time !== 'string'
+          || source.reminder !== undefined && typeof source.reminder !== 'boolean'
+          || source.repeatKind !== undefined && !['none', 'daily', 'weekly', 'interval'].includes(String(source.repeatKind))
+          || source.intervalDays !== undefined && (!Number.isInteger(source.intervalDays) || (source.intervalDays as number) < 1 || (source.intervalDays as number) > 365)) return null;
+        const item = parseScheduleDraft(JSON.stringify(source), undefined, now);
+        if (!item) return null;
+        added.push({ ...item, language: drafts[0]?.language ?? 'en' });
+        continue;
+      }
+      if (op.action !== 'change' && op.action !== 'remove') return null;
+      const targets = op.targets === 'all' || op.targets === 'both' && drafts.length === 2
+        ? drafts.map((_, index) => index + 1) : op.targets;
+      if (!Array.isArray(targets) || !targets.length || targets.some(target => !Number.isInteger(target) || target < 1 || target > drafts.length)) return null;
+      if (op.action === 'remove') {
+        for (const target of targets) removed.add(target as number);
+        continue;
+      }
+      if (!op.changes || typeof op.changes !== 'object' || Array.isArray(op.changes)) return null;
+      const changes = op.changes as Record<string, unknown>;
+      const fields = Object.keys(changes);
+      if (!fields.length || fields.some(field => !allowed.has(field))) return null;
+      if (changes.title !== undefined && (typeof changes.title !== 'string' || !changes.title.trim())) return null;
+      if (changes.day !== undefined && (typeof changes.day !== 'string' || !changes.day.trim())) return null;
+      if (changes.time !== undefined && (typeof changes.time !== 'string' || !changes.time.trim())) return null;
+      if (changes.reminder !== undefined && typeof changes.reminder !== 'boolean') return null;
+      if (changes.repeatKind !== undefined && !['none', 'daily', 'weekly', 'interval'].includes(String(changes.repeatKind))) return null;
+      if (changes.intervalDays !== undefined && (!Number.isInteger(changes.intervalDays) || (changes.intervalDays as number) < 2 || (changes.intervalDays as number) > 365)) return null;
+      for (const target of targets) {
+        const index = (target as number) - 1;
+        const parsed = parseScheduleDraft(JSON.stringify(changes), updated[index], now);
+        if (!parsed) return null;
+        updated[index] = parsed;
+      }
     }
-    if (parsedDrafts.length > 0) {
-      return { kind: 'updated', drafts: parsedDrafts };
-    }
+    const result = updated.filter((_, index) => !removed.has(index + 1)).concat(added);
+    if (!result.length || result.length > MAX_BULK_SCHEDULES ||
+      JSON.stringify(result) === JSON.stringify(drafts)) return null;
+    return { kind: 'updated', drafts: result };
   }
 
-  // Legacy diffs (updates array)
+  // Older model replies may use the patch-only updates format.
   if (Array.isArray(value.updates)) {
     if (!value.updates.length) {
       const question = typeof value.question === 'string' ? value.question.trim().slice(0, 240) : '';
@@ -306,12 +350,13 @@ function normalizedTime(value: unknown): string | null {
 }
 
 export function parseScheduleDraft(raw: string, previous?: ScheduleDraft, now = Date.now()): ScheduleDraft | null {
-  const start = raw.indexOf('{'); const end = raw.lastIndexOf('}');
-  if (start < 0 || end <= start || end - start > 5000) return null;
-  let value: Record<string, unknown>;
-  try { value = JSON.parse(raw.slice(start, end + 1)); }
-  catch { return null; }
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const value = parseObject(raw);
+  if (!value) return null;
+
+
+
+
+
   const base = previous ?? emptyDraft();
   const title = value.title === null ? base.title : typeof value.title === 'string'
     ? value.title.replace(/\s+/g, ' ').trim() : base.title;
@@ -364,9 +409,10 @@ const escapeMarkdown = (value: string) => value.replace(/[\\`*_{}\[\]()#+.!|>~-]
 export function scheduleSummary(draft: ScheduleDraft) {
   const problem = draftProblem(draft);
   if (problem) {
-    if (draft.language === 'tl') return `Kailangan ko pa ang ${problem} para sa iskedyul. Ano ang gusto mong ilagay?`;
-    if (draft.language === 'ceb') return `Kinahanglan pa nako ang ${problem} para sa iskedyul. Unsa ang imong ibutang?`;
-    return `I still need the ${problem} for this schedule. What should it be?`;
+    const known = `**${escapeMarkdown(draft.title ?? 'Title needed')}** · ${draft.day ?? 'Date needed'} · ${draft.time ?? 'Time needed'} PH · Reminder ${draft.reminder ? 'On' : 'Off'}`;
+    if (draft.language === 'tl') return `Ito ang draft:\n\n${known}\n\nKailangan ko pa ang ${problem}. Ano ang gusto mong ilagay? Wala pang na-save.`;
+    if (draft.language === 'ceb') return `Mao ni ang draft:\n\n${known}\n\nKinahanglan pa nako ang ${problem}. Unsa ang imong ibutang? Wala pay na-save.`;
+    return `Here’s the draft:\n\n${known}\n\nI still need a valid ${problem}. What should it be? Nothing has been saved.`;
   }
   const [hour, minute] = draft.time!.split(':').map(Number);
   const date = draft.language === 'en'
@@ -418,16 +464,12 @@ export function calendarIntent(text: string): CalendarIntent {
   const value = text.trim().toLowerCase();
   if (/^(?:how|why|paano|unsaon)\b/.test(value)) return 'chat';
   if (/\bhow to\b/.test(value) && !/\b(?:schedules?|reminders?|calendar|iskedyul)\b/.test(value)) return 'chat';
-
-  // Check for multi-line schedules or multiple times
-  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-  const timePattern = /(?:\d{1,2}(?::[0-5]\d)?\s*(?:am|pm)|(?:[01]?\d|2[0-3]):[0-5]\d)/i;
-  const timeLines = lines.filter(l => timePattern.test(l));
-  if (lines.length >= 2 && timeLines.length >= 2) return 'create';
-  const times = value.match(/(?:\d{1,2}(?::[0-5]\d)?\s*(?:am|pm)|(?:[01]?\d|2[0-3]):[0-5]\d)/gi);
-  if (times && times.length >= 2 && /\b(?:and|then|,)\b/.test(value)) return 'create';
+  if (/\b(?:delete|remove|erase|cancel|tanggalin|burahin|alisin|kuhaa|tangtanga)\b.{0,100}\b(?:schedule|reminder|event|task|calendar|iskedyul|paalala|pahinumdom)\b/i.test(value)
+    || /^(?:delete|remove|erase)\s+(?:#\d+|number\s+\d+|the\s+\w+\s+schedule)\b/i.test(value)) return 'delete';
+  if (/^(?:move|edit|change|reschedule|update)\s+(?:#\d+|number\s+\d+)\b/i.test(value)) return 'edit';
 
   if (/\b(?:edit|change|reschedule|move|update|adjust|modify|baguhin|palitan|ilipat|usba|balhin)\b.{0,100}\b(?:schedule|reminder|task|event|plan|time|date|watering|planting|harvest)\b/i.test(value)) return 'edit';
+  if (/^(?:delete|remove|erase|cancel|move|edit|change|reschedule|update)\b/.test(value)) return 'ambiguous';
   const listWords = /\b(?:show|list|check|view|give me|tell me|what(?:'s| is| are| do i have)|ano(?: ang)?|unsa(?: ang| akong)?|ipakita|pakita|tingnan|tan-awa)\b.{0,100}\b(?:(?:schedule|reminder|plan|task)s?|calendar|iskedyul|paalala|pahinumdom|plano)\b/i.test(value);
   if (listWords || /\ball (?:my )?schedules\b/.test(value)) {
     const personalOrDated = /\b(?:my|our|mine|saved|ako|ko|akong|calendar|today|tomorrow|bukas|ugma|ngayon|karon|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/.test(value);
@@ -435,6 +477,12 @@ export function calendarIntent(text: string): CalendarIntent {
       ? 'list' : 'ambiguous';
   }
   if (/\b(?:what do i have|what's on|what is on|ano ang|unsa akong)\b.{0,70}\b(?:today|tomorrow|bukas|ugma|ngayon|karon|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i.test(value)) return 'list';
+  // Multi-task creation is considered after read and edit wording.
+  const lines = text.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  const timePattern = /(?:\d{1,2}(?::[0-5]\d)?\s*(?:am|pm)|(?:[01]?\d|2[0-3]):[0-5]\d)/i;
+  if (lines.length >= 2 && lines.filter(line => timePattern.test(line)).length >= 2) return 'create';
+  const times = value.match(/(?:\d{1,2}(?::[0-5]\d)?\s*(?:am|pm)|(?:[01]?\d|2[0-3]):[0-5]\d)/gi);
+  if (times && times.length >= 2 && /\b(?:and|then)\b|,/.test(value)) return 'create';
   if (isScheduleIntent(value)) return 'create';
   if (/\b(?:schedule|reminder|plan|task)s?\b.{0,35}\b(?:today|tomorrow|bukas|ugma|ngayon|karon|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i.test(value)) return 'list';
   if (/\b(?:today|tomorrow|bukas|ugma|monday|tuesday|wednesday|thursday|friday|saturday|sunday|daily|weekly|every day|at \d{1,2}(?::\d{2})?\s*(?:am|pm)?)\b/i.test(value)
@@ -444,27 +492,81 @@ export function calendarIntent(text: string): CalendarIntent {
   return 'chat';
 }
 
-function parseObject(raw: string): Record<string, unknown> | null {
-  const start = raw.indexOf('{'); const end = raw.lastIndexOf('}');
-  if (start < 0 || end <= start || end - start > 12000) return null;
-  try {
-    const value: unknown = JSON.parse(raw.slice(start, end + 1));
-    return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
-  } catch { return null; }
+export function parseObject(raw: string): Record<string, unknown> | null {
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escape = false;
+
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i];
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (ch === '\\' && inString) {
+      escape = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (!inString) {
+      if (ch === '{') {
+        if (depth === 0) start = i;
+        depth++;
+      } else if (ch === '}') {
+        depth--;
+        if (depth === 0 && start >= 0) {
+          const candidate = raw.slice(start, i + 1);
+          if (candidate.length <= 16000) {
+            try {
+              const value: unknown = JSON.parse(candidate);
+              if (value && typeof value === 'object' && !Array.isArray(value)) {
+                return value as Record<string, unknown>;
+              }
+            } catch {
+              // Ignore invalid candidate and continue scanning
+            }
+          }
+          start = -1;
+        }
+      }
+    }
+  }
+  return null;
+
+
+
+
+
 }
 
 export function parseCalendarIntent(raw: string): Exclude<CalendarIntent, 'ambiguous'> | null {
   const intent = parseObject(raw)?.intent;
-  return intent === 'chat' || intent === 'create' || intent === 'list' || intent === 'edit' ? intent : null;
+  return intent === 'chat' || intent === 'create' || intent === 'list' || intent === 'edit' || intent === 'delete' ? intent : null;
 }
 
-export function calendarClassificationPrompt(message: string) {
-  return `Classify the user's request for an offline farming assistant. Return ONLY {"intent":"chat|create|list|edit"}. create means add a calendar schedule/reminder, list means read saved schedules, edit means change a saved schedule, chat means ordinary advice or any other request. Never infer a calendar action from a general farming question. Message: ${JSON.stringify(message)}.`;
+export function isStructuredScheduleInput(text: string) {
+  const lines = text.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  return lines.length > 0 && lines.every(line =>
+    /^(?:[-*•]\s*|\d{1,2}[.)]\s*)?(?:\d{1,2}(?::[0-5]\d)?\s*(?:am|pm)\b|(?:[01]?\d|2[0-3]):[0-5]\d\b)/i.test(line));
+}
+export function scheduleDeleteSummary(schedule: Schedule) {
+  return `I’ll remove **${escapeMarkdown(schedule.title)}** — ${schedule.day}, ${timeLabel(schedule.at)} PH${schedule.repeatKind === 'none' ? '' : ` · entire ${schedule.repeatKind} series`}.\n\nReply **Correct** to delete it, or **Cancel** to keep it. Nothing has changed yet.`;
+}
+export function scheduleDeletedMessage(title: string) {
+  return `Done — **${escapeMarkdown(title)}** was removed from your calendar.`;
+}
+
+export function calendarClassificationPrompt(message: string, titles: string[] = []) {
+  return `Classify the user's request for an offline farming assistant. Return ONLY {"intent":"chat|create|list|edit|delete"}. create means add a calendar schedule/reminder, list means read saved schedules, edit means change a saved schedule, delete means remove a saved schedule, chat means ordinary advice or any other request. A bare action verb may refer to one of these saved schedule titles: ${JSON.stringify(titles.slice(0, 30))}. Never infer a calendar action from a general farming question. Message: ${JSON.stringify(message)}.`;
 }
 
 export function bulkScheduleExtractionPrompt(message: string, previous?: ScheduleDraft[], now = Date.now()) {
   const phNow = new Date(now + 8 * 3600000).toISOString().slice(0, 16).replace('T', ' ');
-  return `Extract every distinct schedule in the user's message, maximum ${MAX_BULK_SCHEDULES}. Philippine time now: ${phNow} (UTC+08:00), today ${phDateKey(now)}. Return ONLY {"items":[{"title":string|null,"day":"YYYY-MM-DD"|null,"time":"HH:mm"|null,"reminder":boolean,"repeatKind":"none|daily|weekly|interval","intervalDays":integer,"language":"en|tl|ceb"}]}. Keep the user's order and individual times. Shared dates or reminder instructions apply to each relevant item. Do not invent a missing date or time. For a correction, return the ENTIRE updated list, keeping untouched items and changing only the specified numbered item. Previous list: ${JSON.stringify(previous ?? null)}. User message: ${JSON.stringify(message)}.`;
+  return `Extract EVERY distinct task the user asks to put on the calendar, maximum ${MAX_BULK_SCHEDULES}. Philippine time now: ${phNow} (UTC+08:00), today ${phDateKey(now)}. Return ONLY {"items":[{"title":string|null,"day":"YYYY-MM-DD"|null,"time":"HH:mm"|null,"reminder":boolean,"repeatKind":"none|daily|weekly|interval","intervalDays":integer,"language":"en|tl|ceb"}]}. One separate item per task, in the user's order, including tasks joined by commas or "and". Shared dates or reminder instructions apply to each relevant item; individual times stay with their tasks. One repeating task is one item. Do not invent a missing date or time. Previous list: ${JSON.stringify(previous ?? null)}. User message: ${JSON.stringify(message)}.`;
 }
 
 export function parseScheduleDrafts(raw: string, previous?: ScheduleDraft[]): ScheduleDraft[] | null {
@@ -540,6 +642,45 @@ export function scheduleListMessage(day: string, items: ScheduleOccurrence[], no
   return `### ${label} · ${language === 'en' ? 'Philippine time' : 'Oras sa Pilipinas'}\n\n${header}\n|---|---|---|---|\n${rows.join('\n')}\n\n${total}`;
 }
 
+export function numberedScheduleListMessage(from: string, to: string, items: ScheduleOccurrence[], now = Date.now()) {
+  const label = from === to ? dayLabel(from, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
+    : `${from} to ${to}`;
+  if (!items.length) return `You have no schedules for **${label}** (Philippine time).`;
+  const shown = items.slice(0, 30);
+  const rows = shown.map((item, index) =>
+    `${index + 1}. **${escapeMarkdown(item.title)}** — ${item.day}, ${timeLabel(item.at)} PH${item.repeatKind === 'none' ? '' : ` · ${item.repeatKind} series`}${item.at < now ? ' · past' : ''}`);
+  return `### ${label} · Philippine time\n\n${rows.join('\n')}\n\n${items.length} ${items.length === 1 ? 'schedule' : 'schedules'} total.${items.length > shown.length ? ` Showing the first ${shown.length}.` : ''} You can say **move #2 to 9 AM** or **delete #2**.`;
+}
+
+export function scheduleListRange(text: string, now = Date.now()): { from: string; to: string } | null {
+  const value = text.toLowerCase();
+  const today = phDateKey(now);
+  const stamp = Date.parse(`${today}T00:00:00Z`);
+  const add = (days: number) => new Date(stamp + days * 86400000).toISOString().slice(0, 10);
+  if (/\b(?:this week|current week)\b/.test(value)) {
+    const mondayOffset = (new Date(stamp).getUTCDay() + 6) % 7;
+    return { from: add(-mondayOffset), to: add(6 - mondayOffset) };
+  }
+  if (/\b(?:next week)\b/.test(value)) {
+    const mondayOffset = (new Date(stamp).getUTCDay() + 6) % 7;
+    return { from: add(7 - mondayOffset), to: add(13 - mondayOffset) };
+  }
+  if (/\b(?:next seven days|next 7 days)\b/.test(value)) return { from: today, to: add(6) };
+  if (/\b(?:upcoming|all my schedules|all schedules)\b/.test(value)
+    && !/\b(?:today|tomorrow|day after tomorrow|ngayon|bukas|karon|ugma|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b|\b\d{4}-\d{2}-\d{2}\b/.test(value))
+    return { from: today, to: add(29) };
+  const day = resolveScheduleDay(value, now);
+  return day ? { from: day, to: day } : null;
+}
+
+export function referencedScheduleNumber(text: string): number | null {
+  const match = /(?:#\s*|\bnumber\s+)(\d{1,2})\b/i.exec(text)
+    ?? /^(?:\s*)(\d{1,2})(?:\s*[.!]?\s*)$/.exec(text);
+  if (match) return Number(match[1]);
+  const ordinal = /\b(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\b/i.exec(text)?.[1]?.toLowerCase();
+  return ordinal ? ['first', 'second', 'third', 'fourth', 'fifth', 'sixth', 'seventh', 'eighth', 'ninth', 'tenth'].indexOf(ordinal) + 1 : null;
+}
+
 export function draftFromSchedule(schedule: Schedule, language: ScheduleLanguage = 'en'): ScheduleDraft {
   const local = new Date(schedule.at + 8 * 3600000);
   return { title: schedule.title, day: schedule.day,
@@ -550,6 +691,13 @@ export function draftFromSchedule(schedule: Schedule, language: ScheduleLanguage
 export type EditExtraction = { target: string | null; changes: Partial<ScheduleDraft>; language: ScheduleLanguage };
 export function editScheduleExtractionPrompt(message: string, previous?: ScheduleDraft, now = Date.now()) {
   return `Extract an EDIT to a saved calendar schedule. Philippine date today: ${phDateKey(now)}. Return ONLY {"target":string|null,"changes":object,"language":"en|tl|ceb"}. target is the existing schedule title the user identifies; null if omitted. changes contains ONLY fields explicitly changed: title, day (YYYY-MM-DD), time (24-hour HH:mm), reminder (boolean), repeatKind (none/daily/weekly/interval), intervalDays. Do not invent fields. If this is a correction to a reviewed edit, preserve the existing target and return only newly changed fields. Existing proposal: ${JSON.stringify(previous ?? null)}. User message: ${JSON.stringify(message)}.`;
+}
+export function deleteScheduleExtractionPrompt(message: string) {
+  return `Identify which EXISTING calendar schedule the user wants removed. Return ONLY {"target":string|null}. Use the title or identifying words, or null if no specific schedule is named. Do not claim it was deleted. User message: ${JSON.stringify(message)}.`;
+}
+export function parseDeleteExtraction(raw: string): string | null {
+  const target = parseObject(raw)?.target;
+  return typeof target === 'string' && target.trim() ? target.trim().slice(0, 120) : null;
 }
 
 export function parseEditExtraction(raw: string): EditExtraction | null {
@@ -620,9 +768,9 @@ export function matchingScheduleTargets(records: Schedule[], query: string | nul
   return key ? records.filter(item => clean(item.title).split(' ').some(word => word.startsWith(key))) : [];
 }
 
-export function scheduleTargetChoices(records: Schedule[]) {
-  if (!records.length) return 'I could not find a matching future schedule. Tell me its exact title, or check your calendar.';
-  return `Which schedule should I edit? Reply with its number or exact title:\n\n${records.slice(0, 10)
+export function scheduleTargetChoices(records: Schedule[], action: 'edit' | 'delete' = 'edit') {
+  if (!records.length) return 'I could not find a matching saved schedule. Tell me its exact title, or check your calendar.';
+  return `Which schedule should I ${action}? Reply with its number or exact title:\n\n${records.slice(0, 10)
     .map((item, index) => `${index + 1}. **${escapeMarkdown(item.title)}** — ${item.day}, ${timeLabel(item.at)} PH${item.repeatKind === 'none' ? '' : ` · ${item.repeatKind} series`}`)
     .join('\n')}\n\nNothing has been changed.`;
 }

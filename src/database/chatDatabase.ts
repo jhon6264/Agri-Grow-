@@ -1,9 +1,9 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
 
-import type { ChatMessage, ChatRole, Conversation } from '@/src/chat/chat-types';
+import type { ChatDataCard, ChatMessage, ChatRole, Conversation } from '@/src/chat/chat-types';
 import type { MessageCursor } from '@/src/chat/message-data';
 
-const DATABASE_VERSION = 4;
+const DATABASE_VERSION = 5;
 export const MESSAGE_PAGE_SIZE = 50;
 
 type ConversationRow = {
@@ -24,7 +24,38 @@ type MessageRow = {
   created_at: number;
   status?: ChatMessage['status'];
   attachment_json?: string | null;
+  cards_json?: string | null;
 };
+
+export function parseMessageCards(value: string | null | undefined): ChatDataCard[] | undefined {
+  if (!value) return undefined;
+  try {
+    const cards: unknown = JSON.parse(value);
+    if (!Array.isArray(cards)) return undefined;
+    const valid = cards.filter((card): card is ChatDataCard => {
+      if (!card || typeof card !== 'object' || card.version !== 1) return false;
+      if (card.kind === 'crop') return typeof card.cropId === 'string' && !!card.cropId;
+      if (card.kind === 'prices') return Array.isArray(card.rows) && card.rows.every((row: unknown) => {
+        if (!row || typeof row !== 'object') return false;
+        const price = row as Record<string, unknown>;
+        return typeof price.id === 'string' && typeof price.commodityName === 'string'
+          && ['fruit', 'vegetable', 'spice'].includes(String(price.category))
+          && typeof price.amount === 'number' && Number.isFinite(price.amount) && price.amount > 0
+          && (price.previousAmount === null || typeof price.previousAmount === 'number'
+            && Number.isFinite(price.previousAmount) && price.previousAmount > 0);
+      });
+      if (card.kind === 'weather') {
+        if (typeof card.day?.forecastDate !== 'string'
+          || !['midnight', 'morning', 'lunch', 'afternoon', 'evening'].includes(String(card.period))) return false;
+        const forecast = card.day?.periods?.[card.period];
+        return Boolean(forecast && ['sunny', 'cloudy', 'rainy', 'heavy-rain', 'heavy-rain-thunder'].includes(String(forecast.condition))
+          && typeof forecast.temperatureC === 'number' && Number.isFinite(forecast.temperatureC));
+      }
+      return false;
+    });
+    return valid.length ? valid : undefined;
+  } catch { return undefined; }
+}
 
 const mapConversation = (row: ConversationRow): Conversation => ({
   id: row.id,
@@ -36,15 +67,19 @@ const mapConversation = (row: ConversationRow): Conversation => ({
   lastMessagePreview: row.last_message_preview,
 });
 
-const mapMessage = (row: MessageRow): ChatMessage => ({
-  id: row.id,
-  conversationId: row.conversation_id,
-  role: row.role,
-  content: row.content,
-  createdAt: row.created_at,
-  ...(row.status && row.status !== 'complete' ? { status: row.status } : {}),
-  ...(row.attachment_json ? { attachment: JSON.parse(row.attachment_json) } : {}),
-});
+const mapMessage = (row: MessageRow): ChatMessage => {
+  const cards = parseMessageCards(row.cards_json);
+  return {
+    id: row.id,
+    conversationId: row.conversation_id,
+    role: row.role,
+    content: row.content,
+    createdAt: row.created_at,
+    ...(row.status && row.status !== 'complete' ? { status: row.status } : {}),
+    ...(row.attachment_json ? { attachment: JSON.parse(row.attachment_json) } : {}),
+    ...(cards ? { cards } : {}),
+  };
+};
 
 const migrations = new WeakMap<SQLiteDatabase, Promise<void>>();
 
@@ -125,6 +160,9 @@ async function applyChatMigration(db: SQLiteDatabase) {
   await db.execAsync(`CREATE TABLE IF NOT EXISTS message_attachments (
     message_id TEXT PRIMARY KEY NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
     attachment_json TEXT NOT NULL
+  ); CREATE TABLE IF NOT EXISTS message_cards (
+    message_id TEXT PRIMARY KEY NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    cards_json TEXT NOT NULL
   ); CREATE TABLE IF NOT EXISTS pending_schedule_actions (
     conversation_id TEXT PRIMARY KEY NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
     action_id TEXT NOT NULL,
@@ -149,7 +187,8 @@ export async function listConversations(db: SQLiteDatabase) {
 export async function listMessages(db: SQLiteDatabase, conversationId: string, before?: MessageCursor) {
   const rows = await db.getAllAsync<MessageRow>(
     `SELECT id, conversation_id, role, content, created_at, status,
-       (SELECT attachment_json FROM message_attachments WHERE message_id = messages.id) AS attachment_json
+       (SELECT attachment_json FROM message_attachments WHERE message_id = messages.id) AS attachment_json,
+       (SELECT cards_json FROM message_cards WHERE message_id = messages.id) AS cards_json
      FROM messages
      WHERE conversation_id = ? ${before ? 'AND (created_at, id) < (?, ?)' : ''}
      ORDER BY created_at DESC, id DESC LIMIT ?`,
@@ -190,6 +229,12 @@ export async function insertMessage(db: SQLiteDatabase, message: ChatMessage) {
     try { await db.runAsync('INSERT INTO message_attachments (message_id, attachment_json) VALUES (?, ?)', message.id, JSON.stringify(message.attachment)); }
     catch (error) { await db.runAsync('DELETE FROM messages WHERE id = ?', message.id); throw error; }
   }
+  if (message.cards?.length) await putMessageCards(db, message.id, message.cards);
+}
+
+export async function putMessageCards(db: SQLiteDatabase, messageId: string, cards: ChatDataCard[]) {
+  await db.runAsync('INSERT OR REPLACE INTO message_cards (message_id, cards_json) VALUES (?, ?)',
+    messageId, JSON.stringify(cards));
 }
 
 export async function updateMessage(db: SQLiteDatabase, message: ChatMessage) {

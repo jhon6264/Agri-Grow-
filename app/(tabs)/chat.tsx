@@ -67,6 +67,7 @@ export default function ChatScreen() {
     sending.current = true; setError('');
     const currentDraft = draft;
     const currentAttachment = attachment;
+    Keyboard.dismiss();
     setDraft('');
     setAttachment(undefined);
     try {

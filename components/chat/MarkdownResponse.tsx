@@ -1,6 +1,8 @@
 import { memo, useEffect, useRef, useState, type ReactNode } from 'react';
-import { Alert, Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Alert, Linking, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
 import * as Clipboard from 'expo-clipboard';
+import { AppIcon } from '@/components/chat/AppIcon';
 import { parseMarkdown, type MarkdownNode } from '@/src/chat/markdown';
 import { Fonts } from '@/constants/Typography';
 import hljs from 'highlight.js/lib/core';
@@ -12,20 +14,46 @@ import xml from 'highlight.js/lib/languages/xml';
 import css from 'highlight.js/lib/languages/css';
 import sql from 'highlight.js/lib/languages/sql';
 import bash from 'highlight.js/lib/languages/bash';
+import java from 'highlight.js/lib/languages/java';
+import cpp from 'highlight.js/lib/languages/cpp';
+import c from 'highlight.js/lib/languages/c';
+import csharp from 'highlight.js/lib/languages/csharp';
+import kotlin from 'highlight.js/lib/languages/kotlin';
+import dart from 'highlight.js/lib/languages/dart';
+import php from 'highlight.js/lib/languages/php';
 
-Object.entries({ javascript, typescript, python, json, xml, css, sql, bash }).forEach(([name, language]) =>
+Object.entries({
+  javascript, typescript, python, json, xml, css, sql, bash,
+  java, cpp, c, csharp, kotlin, dart, php,
+}).forEach(([name, language]) =>
   hljs.registerLanguage(name, language)
 );
-const aliases: Record<string, string> = { js: 'javascript', ts: 'typescript', html: 'xml', shell: 'bash', sh: 'bash' };
+const aliases: Record<string, string> = {
+  js: 'javascript', ts: 'typescript', html: 'xml', shell: 'bash', sh: 'bash',
+  py: 'python', cs: 'csharp', kt: 'kotlin', 'c++': 'cpp',
+};
 
 // Shared scroll offsets keep virtualized portions of one table/code block aligned.
 const offsets = new Map<string, number>();
 const listeners = new Map<string, Set<(x: number) => void>>();
 
-function Horizontal({ group, children }: { group: string; children: ReactNode }) {
+function Horizontal({ group, children, isTable }: { group: string; children: ReactNode; isTable?: boolean }) {
   const ref = useRef<ScrollView>(null);
+  const [canScrollRight, setCanScrollRight] = useState(false);
+  const [canScrollLeft, setCanScrollLeft] = useState(false);
+  const contentWidthRef = useRef(0);
+  const containerWidthRef = useRef(0);
+
+  const checkScroll = (x: number, containerW = containerWidthRef.current, contentW = contentWidthRef.current) => {
+    if (!isTable || containerW <= 0 || contentW <= 0) return;
+    setCanScrollLeft(x > 6);
+    setCanScrollRight(contentW > containerW + 4 && x + containerW < contentW - 6);
+  };
   useEffect(() => {
-    const update = (x: number) => ref.current?.scrollTo({ x, animated: false });
+    const update = (x: number) => {
+      ref.current?.scrollTo({ x, animated: false });
+      checkScroll(x);
+    };
     const set = listeners.get(group) ?? new Set();
     set.add(update);
     listeners.set(group, set);
@@ -36,13 +64,25 @@ function Horizontal({ group, children }: { group: string; children: ReactNode })
   }, [group]);
 
   return (
-    <ScrollView
-      horizontal
-      ref={ref}
-      nestedScrollEnabled
-      contentOffset={{ x: offsets.get(group) ?? 0, y: 0 }}
+    <View style={styles.horizontalWrapper}>
+      <ScrollView
+        horizontal
+        ref={ref}
+        nestedScrollEnabled
+        showsHorizontalScrollIndicator={true}
+        persistentScrollbar={Platform.OS === 'android'}
+        contentOffset={{ x: offsets.get(group) ?? 0, y: 0 }}
+        onLayout={(e) => {
+          containerWidthRef.current = e.nativeEvent.layout.width;
+          checkScroll(offsets.get(group) ?? 0);
+        }}
+        onContentSizeChange={(w) => {
+          contentWidthRef.current = w;
+          checkScroll(offsets.get(group) ?? 0);
+        }}
       onScroll={(event) => {
         const x = event.nativeEvent.contentOffset.x;
+        checkScroll(x);
         if (Math.abs((offsets.get(group) ?? 0) - x) < 1) return;
         offsets.set(group, x);
         if (offsets.size > 100) offsets.delete(offsets.keys().next().value!);
@@ -51,6 +91,25 @@ function Horizontal({ group, children }: { group: string; children: ReactNode })
       scrollEventThrottle={32}>
       {children}
     </ScrollView>
+      {isTable && canScrollLeft && (
+        <LinearGradient
+          pointerEvents="none"
+          colors={['rgba(250, 253, 251, 0.95)', 'rgba(250, 253, 251, 0)']}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 0 }}
+          style={styles.tableScrollLeftFade}
+        />
+      )}
+      {isTable && canScrollRight && (
+        <LinearGradient
+          pointerEvents="none"
+          colors={['rgba(250, 253, 251, 0)', 'rgba(250, 253, 251, 0.95)']}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 0 }}
+          style={styles.tableScrollRightFade}
+        />
+      )}
+    </View>
   );
 }
 
@@ -67,13 +126,13 @@ function highlight(code: string, language: string): ReactNode {
   if (!hljs.getLanguage(lang) || code.length > 12000) return code;
   const html = hljs.highlight(code, { language: lang, ignoreIllegals: true }).value;
   const colors: Record<string, string> = {
-    keyword: '#8250A0',
-    string: '#237B4B',
-    number: '#A25821',
-    comment: '#717B76',
-    title: '#2455A5',
-    attr: '#8250A0',
-    built_in: '#2455A5',
+    keyword: '#C678DD',
+    string: '#98C379',
+    number: '#D19A66',
+    comment: '#7F848E',
+    title: '#61AFEF',
+    attr: '#E5C07B',
+    built_in: '#56B6C2',
   };
   const stack: string[] = [];
   return html.split(/(<span class="[^"]+">|<\/span>)/g).map((part, i) => {
@@ -85,15 +144,43 @@ function highlight(code: string, language: string): ReactNode {
       stack.pop();
       return null;
     }
-    return <Text key={i} style={{ color: colors[stack[stack.length - 1]] ?? '#24332A' }}>{decode(part)}</Text>;
+    const color = colors[stack[stack.length - 1]];
+    const isComment = stack[stack.length - 1] === 'comment';
+    return (
+      <Text
+        key={i}
+        style={{
+          color: color ?? '#E6EDF3',
+          fontStyle: isComment ? 'italic' : 'normal',
+        }}>
+        {decode(part)}
+      </Text>
+    );
   });
 }
 
 function Code({ node }: { node: MarkdownNode }) {
   const [copied, setCopied] = useState(false);
-  const language = node.info.trim().split(/\s/)[0] || 'text';
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const language = node.info.trim().split(/\s/)[0] || 'code';
   const full = node.fullCode ?? node.content;
-  const width = Math.max(260, ...full.split('\n').map((line) => line.length * 8 + 24));
+  const width = Math.max(260, ...full.split('\n').map((line) => line.length * 8 + 28));
+
+  useEffect(() => () => {
+    if (timeoutRef.current) clearTimeout(timeoutRef.current);
+  }, []);
+
+  const handleCopy = async () => {
+    try {
+      await Clipboard.setStringAsync(full);
+      setCopied(true);
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
+      timeoutRef.current = setTimeout(() => setCopied(false), 2000);
+    } catch {
+      Alert.alert('Unable to copy code');
+    }
+  };
+
   return (
     <View style={styles.codeBox}>
       <View style={styles.codeHeader}>
@@ -101,12 +188,15 @@ function Code({ node }: { node: MarkdownNode }) {
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="Copy code"
-          onPress={() =>
-            void Clipboard.setStringAsync(full)
-              .then(() => setCopied(true))
-              .catch(() => Alert.alert('Unable to copy code'))
-          }>
-          <Text style={styles.copy}>{copied ? 'Copied' : 'Copy code'}</Text>
+          onPress={() => void handleCopy()}
+          style={({ pressed }) => [styles.copyButton, pressed && styles.copyButtonPressed]}>
+          <AppIcon
+            name={copied ? { ios: 'checkmark', android: 'check', web: 'check' } : { ios: 'doc.on.doc', android: 'content_copy', web: 'content_copy' }}
+            fallback={copied ? '✓' : '⧉'}
+            color={copied ? '#98C379' : '#B4B4B4'}
+            size={13}
+          />
+          <Text style={[styles.copy, copied && styles.copied]}>{copied ? 'Copied!' : 'Copy code'}</Text>
         </Pressable>
       </View>
       <Horizontal group={node.group ?? full}>
@@ -237,7 +327,7 @@ function render(node: MarkdownNode, key: number | string): ReactNode {
   if (node.type === 'table') {
     return (
       <View key={key} style={styles.table}>
-        <Horizontal group={node.group ?? String(key)}>
+        <Horizontal group={node.group ?? String(key)} isTable>
           <View>
             {node.children.flatMap((section) =>
               section.children.map((row, ri) => {
@@ -251,7 +341,7 @@ function render(node: MarkdownNode, key: number | string): ReactNode {
                       isHeader ? styles.tableHeader : isEven ? styles.tableRowEven : styles.tableRowOdd,
                     ]}>
                     {row.children.map((cell, ci) => (
-                      <View key={ci} style={[styles.cell, { width: node.widths?.[ci] ?? 155 }]}>
+                      <View key={ci} style={[styles.cell, { width: node.widths?.[ci] ?? (ci === 0 ? 38 : 100) }]}>
                         <Text
                           selectable
                           style={[
@@ -319,12 +409,12 @@ const styles = StyleSheet.create({
   },
   inlineCode: {
     fontFamily: Fonts.monoMedium,
-    fontSize: 15,
-    backgroundColor: '#E7ECE8',
-    color: '#163E26',
-    paddingHorizontal: 5,
-    paddingVertical: 1.5,
-    borderRadius: 4,
+    fontSize: 14.5,
+    backgroundColor: '#EBEBEB',
+    color: '#1E1E1E',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 5,
   },
   link: {
     color: '#256C47',
@@ -443,39 +533,55 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
   },
   codeBox: {
-    backgroundColor: '#ECF0ED',
-    borderRadius: 10,
+    backgroundColor: '#1E1E1E',
+    borderRadius: 12,
     overflow: 'hidden',
-    marginVertical: 9,
+    marginVertical: 10,
     borderWidth: 1,
-    borderColor: '#D7DFD9',
+    borderColor: '#333333',
   },
   codeHeader: {
-    paddingHorizontal: 13,
-    paddingVertical: 9,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    backgroundColor: '#E1E7E2',
+    backgroundColor: '#282828',
     borderBottomWidth: 1,
-    borderColor: '#D4DDD6',
+    borderColor: '#333333',
   },
   language: {
     fontFamily: Fonts.monoRegular,
-    fontSize: 13,
-    color: '#34453A',
+    fontSize: 12,
+    color: '#B4B4B4',
+    textTransform: 'lowercase',
+  },
+  copyButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  copyButtonPressed: {
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
   },
   copy: {
-    color: '#245D39',
-    fontSize: 13,
-    fontFamily: Fonts.sansSemiBold,
+    color: '#B4B4B4',
+    fontSize: 12,
+    fontFamily: Fonts.sansMedium,
+  },
+  copied: {
+    color: '#98C379',
   },
   code: {
-    padding: 13,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
     fontFamily: Fonts.monoRegular,
-    fontSize: 14,
-    lineHeight: 21,
-    color: '#24332A',
+    fontSize: 13.5,
+    lineHeight: 20,
+    color: '#E6EDF3',
   },
   table: {
     borderWidth: 1,
@@ -500,8 +606,8 @@ const styles = StyleSheet.create({
     backgroundColor: '#F6FAF7',
   },
   cell: {
-    paddingHorizontal: 13,
-    paddingVertical: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 8,
     borderRightWidth: 1,
     borderBottomWidth: 1,
     borderColor: '#E2EBE3',
@@ -509,14 +615,34 @@ const styles = StyleSheet.create({
   },
   cellText: {
     fontFamily: Fonts.sansMedium,
-    fontSize: 15.5,
-    lineHeight: 22,
+    fontSize: 14,
+    lineHeight: 20,
     color: '#1F3427',
   },
   headerCellText: {
     fontFamily: Fonts.sansBold,
-    fontSize: 15,
-    lineHeight: 20,
+    fontSize: 14,
+    lineHeight: 19,
     color: '#143821',
+  },
+  horizontalWrapper: {
+    position: 'relative',
+    width: '100%',
+  },
+  tableScrollLeftFade: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    width: 20,
+    zIndex: 2,
+  },
+  tableScrollRightFade: {
+    position: 'absolute',
+    right: 0,
+    top: 0,
+    bottom: 0,
+    width: 20,
+    zIndex: 2,
   },
 });

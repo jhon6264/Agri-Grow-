@@ -46,3 +46,20 @@ export async function saveScheduleBatchWithReminders(db: SQLiteDatabase, schedul
     throw error;
   }
 }
+
+export async function deleteScheduleWithReminder(db: SQLiteDatabase, schedule: Schedule, canCommit?: () => boolean) {
+  await initializeSchedules(db);
+  if (canCommit && !canCommit()) throw new Error('Sending stopped. Your schedule was not removed.');
+  try {
+    await cancelScheduleReminders(schedule);
+    if (canCommit && !canCommit()) throw new Error('Sending stopped. Your schedule was not removed.');
+    const result = await db.runAsync(`DELETE FROM schedules WHERE id=? AND title=? AND day=? AND at=?
+      AND reminder=? AND repeatKind=? AND intervalDays=?`, schedule.id, schedule.title, schedule.day,
+    schedule.at, schedule.reminder, schedule.repeatKind, schedule.intervalDays);
+    if (result.changes !== 1) throw new Error('This schedule changed since the review. Please start a new delete request.');
+  } catch (error) {
+    const current = await getSchedule(db, schedule.id).catch(() => null);
+    if (current?.reminder) await scheduleScheduleReminders(current, false).catch(() => undefined);
+    throw error;
+  }
+}

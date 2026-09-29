@@ -45,3 +45,31 @@ test('StreamSmoother advances sub-word tokens without freezing', async () => {
   smoother.flush();
   assert.equal(visible[visible.length - 1].text, 'Kamatis ');
 });
+
+test('StreamSmoother keeps emoji clusters intact and finishes a burst promptly', async () => {
+  const { StreamSmoother } = await import('../src/chat/stream-smoother.ts');
+  const frames = [];
+  const smoother = new StreamSmoother((text, done) => frames.push({ text, done }));
+  smoother.append('\ud83d');
+  assert.equal(frames.length, 0, 'A lone high surrogate must stay buffered');
+  smoother.append('\ude80 Hello 👨‍👩‍👧‍👦 ' + 'word '.repeat(100));
+  smoother.markDone();
+  await new Promise(resolve => setTimeout(resolve, 120));
+  assert.equal(frames.at(-1).text, '🚀 Hello 👨‍👩‍👧‍👦 ' + 'word '.repeat(100));
+  assert.equal(frames.at(-1).done, true);
+  assert.ok(frames.every(frame => !/[\uD800-\uDBFF]$/.test(frame.text)));
+  assert.ok(frames.every(frame => !frame.text.endsWith('👨‍') && !frame.text.endsWith('👨‍👩‍')));
+});
+
+test('reset discards pending text from the previous response', async () => {
+  const { StreamSmoother } = await import('../src/chat/stream-smoother.ts');
+  const frames = [];
+  const smoother = new StreamSmoother((text, done) => frames.push({ text, done }));
+  smoother.append('old '.repeat(100));
+  smoother.reset();
+  smoother.append('new answer');
+  smoother.markDone();
+  await new Promise(resolve => setTimeout(resolve, 80));
+  assert.equal(frames.at(-1).text, 'new answer');
+  assert.equal(frames.at(-1).done, true);
+});
